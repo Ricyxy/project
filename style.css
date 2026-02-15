@@ -1,0 +1,171 @@
+body {
+  font-family: Arial, sans-serif;
+  padding: 15px;
+  background: #f4f4f4;
+}
+
+h1 {
+  text-align: center;
+}
+
+.card {
+  background: white;
+  padding: 15px;
+  border-radius: 8px;
+  margin-bottom: 15px;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 10px;
+}
+
+input {
+  padding: 8px;
+  font-size: 14px;
+}
+
+button {
+  padding: 14px;
+  width: 100%;
+  font-size: 16px;
+  background: #007bff;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.result {
+  background: #e9ffe9;
+}
+
+/* Coil list: inline chips with checkbox */
+#coilList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+#coilList label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #fff;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid #e6e6e6;
+  cursor: pointer;
+  margin: 4px 0;
+}
+
+#coilList input[type="checkbox"] {
+  margin: 0;
+}
+
+.result h3 {
+  margin-top: 0;
+}
+
+/* Visual table representation: widths column, vertical bracket, table length */
+.table-visual {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin: 8px 0 14px;
+}
+.table-visual .widths {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 80px;
+}
+.table-visual .width-line {
+  font-size: 13px;
+  color: #222;
+}
+.table-visual .width-line .cuts {
+  color: #555;
+  margin-left: 6px;
+}
+.table-visual .bracket {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+}
+.table-visual .bar {
+  width: 4px;
+  height: 120px;
+  background: #111;
+  border-radius: 3px;
+}
+.table-visual .table-length {
+  font-size: 28px;
+  font-weight: 700;
+  color: #111;
+}
+
+button:hover {
+  filter: brightness(0.95);
+}
+
+/* Parts list layout */
+.partRow {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.partRow label {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0;
+}
+
+.partRow input {
+  width: 120px;
+}
+
+.partRow .removePart {
+  background: #dc3545;
+  color: #fff;
+  border: none;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.partRow .removePart:hover {
+  filter: brightness(0.95);
+}
+
+/* Add-part button: keep it compact */
+#addPartBtn {
+  display: inline-block;
+  width: auto;
+  padding: 10px 14px;
+  background: #28a745;
+  border-radius: 6px;
+  border: none;
+  color: #fff;
+  cursor: pointer;
+  margin-top: 6px;
+}
+
+#addPartBtn:hover { filter: brightness(0.95); }
+
+/* Make main action button stand out but not conflict with small row buttons */
+button:not(#addPartBtn):not(.removePart) {
+  box-shadow: 0 1px 0 rgba(0,0,0,0.05) inset;
+}
+
+/* Responsive tweaks */
+@media (max-width: 640px) {
+  .partRow input { width: 100%; }
+  .partRow { flex-direction: column; align-items: stretch; }
+  #addPartBtn { width: 100%; }
+}
