@@ -6,46 +6,52 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="style.css">
 </head>
-
 <body>
+  <main class="app-shell">
+    <header class="hero">
+      <p class="hero-kicker">Optimizacija rezanja lima</p>
+      <h1>Kalkulator limova</h1>
+      <p class="hero-subtitle">
+        Unesi dimenzije dijelova, odaberi dostupne coilove i dobij plan rezanja sa sto manje otpada.
+      </p>
+    </header>
 
-<h1>Kalkulator Limova</h1>
+    <section class="layout-grid">
+      <article class="card">
+        <h2>Narudzba</h2>
+        <div id="partsContainer">
+          <div class="partRow">
+            <label>
+              Sirina dijela (cm)
+              <input class="partWidth" type="number" value="25" min="0.1" step="0.1">
+            </label>
+            <label>
+              Duzina dijela (m)
+              <input class="partLength" type="number" value="3" min="0.01" step="0.01">
+            </label>
+            <label>
+              Kolicina
+              <input class="quantity" type="number" value="5" min="1" step="1">
+            </label>
+            <button type="button" class="removePart">Ukloni</button>
+          </div>
+        </div>
+        <button id="addPartBtn" type="button">Dodaj dio</button>
+      </article>
 
-<div class="card">
-  <h2>Narudžba</h2>
-  <div id="partsContainer">
-    <div class="partRow">
-      <label>
-        Širina dijela (cm)
-        <input class="partWidth" type="number" value="25" min="0.1" step="0.1">
-      </label>
+      <article class="card">
+        <h2>Dostupni limovi</h2>
+        <div id="coilList"></div>
+      </article>
+    </section>
 
-      <label>
-        Dužina dijela (m)
-        <input class="partLength" type="number" value="3" min="0.01" step="0.01">
-      </label>
-
-      <label>
-        Količina
-        <input class="quantity" type="number" value="5" min="1" step="1">
-      </label>
-
-      <button type="button" class="removePart">Ukloni</button>
+    <div class="actions">
+      <button id="calcBtn" type="button">Izracunaj plan rezanja</button>
     </div>
-  </div>
 
-  <button id="addPartBtn" type="button">Dodaj dio</button>
-</div>
+    <section class="card result" id="result"></section>
+  </main>
 
-<div class="card">
-  <h2>Dostupni Limovi</h2>
-  <div id="coilList"></div>
-</div>
-
-<button id="calcBtn">Izračunaj</button>
-
-<div class="card result" id="result"></div>
-
-<script src="app.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
