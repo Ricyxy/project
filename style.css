@@ -27,6 +27,11 @@ input {
 }
 
 button {
+  #optimizeBtn {
+    display: block;
+    width: 100%;
+    margin-top: 10px;
+  }
   padding: 14px;
   width: 100%;
   font-size: 16px;
@@ -41,7 +46,7 @@ button {
   background: #e9ffe9;
 }
 
-/* Coil list: inline chips with checkbox */
+/* Lista coilova: inline prikaz sa checkboxom */
 #coilList {
   display: flex;
   flex-wrap: wrap;
@@ -68,7 +73,7 @@ button {
   margin-top: 0;
 }
 
-/* Visual table representation: widths column, vertical bracket, table length */
+/* Vizualni prikaz stola: kolona širina, vertikalna zagrada, dužina stola */
 .table-visual {
   display: flex;
   align-items: center;
@@ -111,7 +116,7 @@ button:hover {
   filter: brightness(0.95);
 }
 
-/* Parts list layout */
+/* Prikaz liste dijelova */
 .partRow {
   display: flex;
   gap: 12px;
@@ -143,7 +148,7 @@ button:hover {
   filter: brightness(0.95);
 }
 
-/* Add-part button: keep it compact */
+/* Dugme za dodavanje dijela: kompaktan prikaz */
 #addPartBtn {
   display: inline-block;
   width: auto;
@@ -158,12 +163,12 @@ button:hover {
 
 #addPartBtn:hover { filter: brightness(0.95); }
 
-/* Make main action button stand out but not conflict with small row buttons */
+/* Glavno dugme istaknuto, ne ometa mala dugmad u redovima */
 button:not(#addPartBtn):not(.removePart) {
   box-shadow: 0 1px 0 rgba(0,0,0,0.05) inset;
 }
 
-/* Responsive tweaks */
+/* Prilagodbe za responzivni dizajn */
 @media (max-width: 640px) {
   .partRow input { width: 100%; }
   .partRow { flex-direction: column; align-items: stretch; }
