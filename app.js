@@ -8,6 +8,11 @@
 ];
 
 const MAX_TABLE_LENGTH = 8;
+const MAX_SCRAP_LENGTH_M = 1;
+const COMMON_SCRAP_MAX_LENGTH_M = 0.4;
+const COMMON_SCRAP_MAX_WIDTH_CM = 40;
+const MAX_SCRAP_SUGGESTIONS = 3;
+const SCRAP_PREF_KEY = 'scrapDecisionPreference';
 const WIDTH_SCALE = 10; // 0.1 cm precision
 const EPS = 1e-9;
 const BEAM_WIDTH = 3;
@@ -17,17 +22,68 @@ const ADAPTIVE_BEAM_MAX = 6;
 const MAX_CANDIDATES_PER_STEP = 6;
 const POST_PASS_ROUNDS = 2;
 
-const TABLE_COUNT_PENALTY = 0.04;
-const STATE_REMAINING_WEIGHT = 0.35;
-const REMNANT_POTENTIAL_WEIGHT = 0.18;
-const LOCAL_REMNANT_BONUS_WEIGHT = 0.35;
-const SIDE_WASTE_PENALTY_WEIGHT = 0.15;
+const DEFAULT_OPTIMIZATION_PROFILE = {
+  tableCountPenalty: 0.055,
+  lengthPenaltyWeight: 0.08,
+  remnantFragmentPenaltyWeight: 0.06,
+  compactRemnantBonusWeight: 0.1,
+  sideWastePenaltyWeight: 0.15,
+  localRemnantBonusWeight: 0.35,
+  stateRemainingWeight: 0.35,
+  remnantPotentialWeight: 0.18,
+  lowYieldPenaltyWeight: 0.16,
+  beamDepth: 2,
+  beamWidthBias: 0,
+  maxCandidatesPerStep: 6
+};
+
+const OPTIMIZATION_PROFILES = {
+  min_waste: {
+    tableCountPenalty: 0.028,
+    lengthPenaltyWeight: 0.025,
+    remnantFragmentPenaltyWeight: 0.02,
+    compactRemnantBonusWeight: 0.05,
+    sideWastePenaltyWeight: 0.16,
+    localRemnantBonusWeight: 0.44,
+    stateRemainingWeight: 0.42,
+    remnantPotentialWeight: 0.24,
+    lowYieldPenaltyWeight: 0.1,
+    beamDepth: 3,
+    beamWidthBias: 1,
+    maxCandidatesPerStep: 8
+  },
+  balanced: {
+    tableCountPenalty: 0.055,
+    lengthPenaltyWeight: 0.08,
+    remnantFragmentPenaltyWeight: 0.06,
+    compactRemnantBonusWeight: 0.1,
+    lowYieldPenaltyWeight: 0.16,
+    beamDepth: 2,
+    beamWidthBias: 0,
+    maxCandidatesPerStep: 6
+  },
+  practical: {
+    tableCountPenalty: 0.11,
+    lengthPenaltyWeight: 0.21,
+    remnantFragmentPenaltyWeight: 0.16,
+    compactRemnantBonusWeight: 0.2,
+    sideWastePenaltyWeight: 0.22,
+    localRemnantBonusWeight: 0.24,
+    stateRemainingWeight: 0.26,
+    remnantPotentialWeight: 0.1,
+    lowYieldPenaltyWeight: 0.35,
+    beamDepth: 2,
+    beamWidthBias: -1,
+    maxCandidatesPerStep: 5
+  }
+};
 
 const resultDiv = document.getElementById('result');
 const calcBtn = document.getElementById('calcBtn');
 const coilList = document.getElementById('coilList');
 const partsContainer = document.getElementById('partsContainer');
 const addPartBtn = document.getElementById('addPartBtn');
+const optimizationModeSelect = document.getElementById('optimizationMode');
 
 function toWidthUnits(cm) {
   return Math.round(cm * WIDTH_SCALE);
@@ -469,14 +525,54 @@ function buildBestPatternForCoilAndLength(partsRemaining, coilWidth, tableLength
   return clonePattern(pattern);
 }
 
-function buildTableCandidates(partsRemaining, enabledCoils, dpCache, limit = MAX_CANDIDATES_PER_STEP, candidatesCache = null) {
+function getOptimizationProfile(mode) {
+  const modeProfile = OPTIMIZATION_PROFILES[mode] || OPTIMIZATION_PROFILES.balanced;
+  const merged = {
+    ...DEFAULT_OPTIMIZATION_PROFILE,
+    ...modeProfile
+  };
+
+  return {
+    ...merged,
+    beamDepth: Math.max(1, Math.round(merged.beamDepth)),
+    maxCandidatesPerStep: Math.max(1, Math.round(merged.maxCandidatesPerStep)),
+    beamWidthBias: Number.isFinite(merged.beamWidthBias) ? merged.beamWidthBias : 0
+  };
+}
+
+function computePatternShapeMetrics(pattern) {
+  const remnantRects = buildPatternRemnantRectangles(pattern)
+    .filter((r) => r.width > EPS && r.length > EPS);
+
+  const remnantAreas = remnantRects.map((r) => r.width * r.length);
+  const totalRemnantArea = remnantAreas.reduce((sum, area) => sum + area, 0);
+  const largestRemnantArea = remnantAreas.length > 0 ? Math.max(...remnantAreas) : 0;
+  const normalizedFragmentation = remnantRects.length <= 1
+    ? 0
+    : (remnantRects.length - 1) / Math.max(1, pattern.strips.length + 1);
+  const compactnessRatio = totalRemnantArea <= EPS ? 1 : (largestRemnantArea / totalRemnantArea);
+
+  return {
+    remnantRectCount: remnantRects.length,
+    normalizedFragmentation,
+    compactnessRatio,
+    largestRemnantArea
+  };
+}
+
+function buildTableCandidates(partsRemaining, enabledCoils, dpCache, profile, limit = null, candidatesCache = null) {
+  const candidateLimit = Math.max(
+    1,
+    Math.round(Number.isFinite(limit) ? limit : profile.maxCandidatesPerStep)
+  );
   const partsSignature = buildPartsSignature(partsRemaining);
   if (candidatesCache && candidatesCache.has(partsSignature)) {
     return candidatesCache.get(partsSignature)
-      .slice(0, limit)
+      .slice(0, candidateLimit)
       .map((entry) => cloneCandidateEntry(entry));
   }
 
+  const remainingDemandAreaCm = computeRemainingAreaCm(partsRemaining);
   const lengthCandidates = buildLengthCandidates(partsRemaining);
   const candidateEntries = [];
 
@@ -489,16 +585,30 @@ function buildTableCandidates(partsRemaining, enabledCoils, dpCache, limit = MAX
       const remnantRects = buildPatternRemnantRectangles(pattern);
       const usefulRemnantArea = estimateReusableAreaFromRectangles(remnantRects, remainingAfterPattern);
       const sideWasteArea = pattern.remainingWidth * pattern.maxLength;
+      const shapeMetrics = computePatternShapeMetrics(pattern);
+      const lengthPenalty = profile.lengthPenaltyWeight * (pattern.maxLength / MAX_TABLE_LENGTH);
+      const fragmentationPenalty = profile.remnantFragmentPenaltyWeight * shapeMetrics.normalizedFragmentation;
+      const compactRemnantBonus = profile.compactRemnantBonusWeight * shapeMetrics.compactnessRatio;
+      const producedShare = Math.min(1, pattern.producedArea / Math.max(remainingDemandAreaCm, EPS));
+      const lowYieldPenalty = profile.lowYieldPenaltyWeight * Math.pow(Math.max(0, 1 - producedShare), 2);
       const adjustedWastePerProduced =
-        (pattern.wasteArea + (SIDE_WASTE_PENALTY_WEIGHT * sideWasteArea) - (LOCAL_REMNANT_BONUS_WEIGHT * usefulRemnantArea)) /
-        Math.max(pattern.producedArea, EPS);
+        ((pattern.wasteArea +
+        (profile.sideWastePenaltyWeight * sideWasteArea) -
+        (profile.localRemnantBonusWeight * usefulRemnantArea)) /
+        Math.max(pattern.producedArea, EPS)) +
+        lengthPenalty +
+        fragmentationPenalty -
+        compactRemnantBonus +
+        lowYieldPenalty;
 
       candidateEntries.push({
         pattern,
         metrics: {
           usefulRemnantArea,
           sideWasteArea,
-          adjustedWastePerProduced
+          lowYieldPenalty,
+          adjustedWastePerProduced,
+          shapeMetrics
         }
       });
     });
@@ -520,20 +630,20 @@ function buildTableCandidates(partsRemaining, enabledCoils, dpCache, limit = MAX
     return pa.remainingWidth - pb.remainingWidth;
   });
 
-  const trimmed = candidateEntries.slice(0, Math.max(limit, MAX_CANDIDATES_PER_STEP));
+  const trimmed = candidateEntries.slice(0, Math.max(candidateLimit, profile.maxCandidatesPerStep));
   if (candidatesCache) {
     candidatesCache.set(partsSignature, trimmed.map((entry) => cloneCandidateEntry(entry)));
   }
 
-  return trimmed.slice(0, limit).map((entry) => cloneCandidateEntry(entry));
+  return trimmed.slice(0, candidateLimit).map((entry) => cloneCandidateEntry(entry));
 }
 
-function buildBestTable(partsRemaining, enabledCoils, dpCache, candidatesCache) {
-  const candidates = buildTableCandidates(partsRemaining, enabledCoils, dpCache, 1, candidatesCache);
+function buildBestTable(partsRemaining, enabledCoils, dpCache, profile, candidatesCache) {
+  const candidates = buildTableCandidates(partsRemaining, enabledCoils, dpCache, profile, 1, candidatesCache);
   return candidates.length > 0 ? candidates[0].pattern : null;
 }
 
-function scoreSolverState(state, totalRequiredAreaCm) {
+function scoreSolverState(state, totalRequiredAreaCm, profile) {
   const remainingArea = computeRemainingAreaCm(state.partsRemaining);
   const producedArea = Math.max(0, totalRequiredAreaCm - remainingArea);
   const wasteSoFar = Math.max(0, state.openedAreaCm - producedArea);
@@ -545,24 +655,24 @@ function scoreSolverState(state, totalRequiredAreaCm) {
   const normalizedPotential = remnantPotential / norm;
 
   return normalizedWaste +
-    (STATE_REMAINING_WEIGHT * normalizedRemaining) +
-    (TABLE_COUNT_PENALTY * state.tableCount) -
-    (REMNANT_POTENTIAL_WEIGHT * normalizedPotential);
+    (profile.stateRemainingWeight * normalizedRemaining) +
+    (profile.tableCountPenalty * state.tableCount) -
+    (profile.remnantPotentialWeight * normalizedPotential);
 }
 
-function computeAdaptiveBeamWidth(partsRemaining, remnantStrips) {
+function computeAdaptiveBeamWidth(partsRemaining, remnantStrips, profile) {
   const activePartKinds = partsRemaining.reduce((sum, p) => sum + (p.qty > 0 ? 1 : 0), 0);
   const remnantPressure = Math.min(3, Math.floor(remnantStrips.length / 4));
-  const dynamicWidth = BEAM_WIDTH + Math.floor(activePartKinds / 2) + remnantPressure;
-  return Math.max(ADAPTIVE_BEAM_MIN, Math.min(ADAPTIVE_BEAM_MAX, dynamicWidth));
+  const dynamicWidth = BEAM_WIDTH + profile.beamWidthBias + Math.floor(activePartKinds / 2) + remnantPressure;
+  return Math.max(ADAPTIVE_BEAM_MIN, Math.min(ADAPTIVE_BEAM_MAX, Math.round(dynamicWidth)));
 }
 
 
-function chooseNextTableByBeam(baseState, enabledCoils, dpCache, totalRequiredAreaCm, candidatesCache) {
-  const beamWidth = computeAdaptiveBeamWidth(baseState.partsRemaining, baseState.remnantStrips);
+function chooseNextTableByBeam(baseState, enabledCoils, dpCache, totalRequiredAreaCm, profile, candidatesCache) {
+  const beamWidth = computeAdaptiveBeamWidth(baseState.partsRemaining, baseState.remnantStrips, profile);
   let frontier = [{ state: cloneSolverState(baseState), firstPattern: null, score: Infinity }];
 
-  for (let depth = 0; depth < BEAM_DEPTH; depth++) {
+  for (let depth = 0; depth < profile.beamDepth; depth++) {
     const expanded = [];
 
     frontier.forEach((node) => {
@@ -571,7 +681,7 @@ function chooseNextTableByBeam(baseState, enabledCoils, dpCache, totalRequiredAr
         expanded.push({
           state: node.state,
           firstPattern: node.firstPattern,
-          score: scoreSolverState(node.state, totalRequiredAreaCm)
+          score: scoreSolverState(node.state, totalRequiredAreaCm, profile)
         });
         return;
       }
@@ -580,7 +690,8 @@ function chooseNextTableByBeam(baseState, enabledCoils, dpCache, totalRequiredAr
         node.state.partsRemaining,
         enabledCoils,
         dpCache,
-        MAX_CANDIDATES_PER_STEP,
+        profile,
+        profile.maxCandidatesPerStep,
         candidatesCache
       );
       candidates.forEach((entry) => {
@@ -595,7 +706,7 @@ function chooseNextTableByBeam(baseState, enabledCoils, dpCache, totalRequiredAr
         expanded.push({
           state: childState,
           firstPattern: node.firstPattern || entry.pattern,
-          score: scoreSolverState(childState, totalRequiredAreaCm) + entry.metrics.adjustedWastePerProduced
+          score: scoreSolverState(childState, totalRequiredAreaCm, profile) + entry.metrics.adjustedWastePerProduced
         });
       });
     });
@@ -964,27 +1075,18 @@ function findUnplaceablePart(partsRemaining, enabledCoils) {
   return partsRemaining.find((p) => p.qty > 0 && (p.width > maxCoilWidth + EPS || p.length > MAX_TABLE_LENGTH + EPS));
 }
 
-function calculate() {
-  const partsData = getPartsFromUI();
-  if (partsData.error) {
-    resultDiv.innerHTML = `Greska: ${partsData.error}`;
-    return;
-  }
-
-  const enabledCoils = getEnabledCoils();
-  if (enabledCoils.length === 0) {
-    resultDiv.innerHTML = 'Greska: Niste odabrali nijedan lim.';
-    return;
-  }
-
-  const originalParts = partsData.parts.map((p) => ({ ...p }));
+function solveCutPlan(partsInput, enabledCoils, mode = 'balanced', originalPartsReference = null) {
+  const profile = getOptimizationProfile(mode);
+  const originalParts = originalPartsReference
+    ? originalPartsReference.map((p) => ({ ...p }))
+    : partsInput.map((p) => ({ ...p }));
   const coilsResult = enabledCoils.map((c) => ({ coilWidth: c.coilWidth, tables: [] }));
-  const totalRequiredAreaCm = computeRemainingAreaCm(originalParts);
+  const totalRequiredAreaCm = computeRemainingAreaCm(partsInput);
   const dpCache = new Map();
   const candidatesCache = new Map();
 
   const solverState = {
-    partsRemaining: partsData.parts.map((p) => ({ ...p })),
+    partsRemaining: partsInput.map((p) => ({ ...p })),
     remnantStrips: [],
     remnantOrder: 0,
     openedAreaCm: 0,
@@ -995,8 +1097,9 @@ function calculate() {
   while (solverState.partsRemaining.some((p) => p.qty > 0)) {
     guard += 1;
     if (guard > 5000) {
-      resultDiv.innerHTML = 'Greska: Prekinuto zbog previse iteracija (provjerite ulazne podatke).';
-      return;
+      return {
+        error: 'Greska: Prekinuto zbog previse iteracija (provjerite ulazne podatke).'
+      };
     }
 
     placePartsIntoRemnants(solverState.partsRemaining, solverState.remnantStrips);
@@ -1007,17 +1110,20 @@ function calculate() {
       enabledCoils,
       dpCache,
       totalRequiredAreaCm,
+      profile,
       candidatesCache
-    ) || buildBestTable(solverState.partsRemaining, enabledCoils, dpCache, candidatesCache);
+    ) || buildBestTable(solverState.partsRemaining, enabledCoils, dpCache, profile, candidatesCache);
 
     if (!bestTable) {
       const bad = findUnplaceablePart(solverState.partsRemaining, enabledCoils);
       if (bad) {
-        resultDiv.innerHTML = `Greska: Dio ${bad.width}cm x ${bad.length}m ne moze stati u dostupne limove.`;
-      } else {
-        resultDiv.innerHTML = 'Greska: Nije pronadjeno validno rjesenje za preostale dijelove.';
+        return {
+          error: `Greska: Dio ${bad.width}cm x ${bad.length}m ne moze stati u dostupne limove.`
+        };
       }
-      return;
+      return {
+        error: 'Greska: Nije pronadjeno validno rjesenje za preostale dijelove.'
+      };
     }
 
     applyTable(solverState.partsRemaining, bestTable);
@@ -1032,7 +1138,199 @@ function calculate() {
   }
 
   runPostOptimization(coilsResult);
-  resultDiv.innerHTML = renderResult(coilsResult, originalParts);
+  const totalWasteM2 = collectTableRefs(coilsResult).reduce((sum, ref) => sum + (ref.wasteAreaCm / 100), 0);
+
+  return {
+    coilsResult,
+    originalParts,
+    totalWasteM2
+  };
+}
+
+function isScrapCandidatePart(part) {
+  return part.qty > 0 && part.length <= MAX_SCRAP_LENGTH_M + EPS;
+}
+
+function getScrapAvailabilityScore(part) {
+  if (part.length <= COMMON_SCRAP_MAX_LENGTH_M + EPS && part.width <= COMMON_SCRAP_MAX_WIDTH_CM + EPS) {
+    return 2;
+  }
+  if (part.length <= MAX_SCRAP_LENGTH_M + EPS) {
+    return 1;
+  }
+  return 0;
+}
+
+function findScrapSuggestions(originalParts, enabledCoils, mode, baseWasteM2) {
+  const suggestions = [];
+
+  originalParts.forEach((part, idx) => {
+    if (!isScrapCandidatePart(part)) return;
+
+    const reducedParts = originalParts.map((p, pIdx) => ({
+      ...p,
+      qty: pIdx === idx ? Math.max(0, p.qty - 1) : p.qty
+    }));
+
+    if (reducedParts[idx].qty === part.qty) return;
+
+    const variantResult = solveCutPlan(reducedParts, enabledCoils, mode, originalParts);
+    if (variantResult.error) return;
+
+    const savedWaste = baseWasteM2 - variantResult.totalWasteM2;
+    if (savedWaste <= EPS) return;
+
+    suggestions.push({
+      part,
+      partIndex: idx,
+      reducedParts,
+      savedWasteM2: savedWaste,
+      availabilityScore: getScrapAvailabilityScore(part),
+      plan: variantResult
+    });
+  });
+
+  suggestions.sort((a, b) => {
+    if (a.availabilityScore !== b.availabilityScore) {
+      return b.availabilityScore - a.availabilityScore;
+    }
+    if (Math.abs(a.savedWasteM2 - b.savedWasteM2) > EPS) {
+      return b.savedWasteM2 - a.savedWasteM2;
+    }
+    return a.part.width - b.part.width;
+  });
+
+  return suggestions.slice(0, MAX_SCRAP_SUGGESTIONS);
+}
+
+function renderScrapSuggestionsSummary(suggestions) {
+  if (!suggestions.length) return '';
+
+  const labelByScore = {
+    2: 'vrlo cest otpad (do 40cm i do 0.4m)',
+    1: 'moguc otpad (do 1m)',
+    0: 'rijedji otpad'
+  };
+
+  const itemsHtml = suggestions.map((s, idx) => (
+    `<li>#${idx + 1} ${s.part.width}cm x ${s.part.length}m, usteda otpada ~${s.savedWasteM2.toFixed(3)} m2 (${labelByScore[s.availabilityScore]})</li>`
+  )).join('');
+
+  return `<br><b>Predlozeni komadi sa otpada:</b><ul>${itemsHtml}</ul>`;
+}
+
+function getScrapDecisionPreference() {
+  try {
+    const value = window.localStorage.getItem(SCRAP_PREF_KEY);
+    return value === 'use' || value === 'skip' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function setScrapDecisionPreference(value) {
+  try {
+    if (value === 'use' || value === 'skip') {
+      window.localStorage.setItem(SCRAP_PREF_KEY, value);
+    }
+  } catch {
+    // ignore storage issues (private mode, blocked storage)
+  }
+}
+
+function renderScrapDecisionPanel(suggestion) {
+  return `
+    <div class="scrap-panel">
+      <b>Prijedlog otpada:</b> Mozete li pronaci 1 komad ${suggestion.part.width} cm x ${suggestion.part.length} m?<br>
+      Procijenjeno smanjenje otpada: <b>${suggestion.savedWasteM2.toFixed(3)} m2</b>.
+      <div class="scrap-panel-actions">
+        <button type="button" id="acceptScrapBtn" class="scrap-accept">Imam taj komad</button>
+        <button type="button" id="declineScrapBtn" class="scrap-decline">Nemam, ostavi osnovni plan</button>
+      </div>
+      <label class="scrap-remember">
+        <input type="checkbox" id="rememberScrapDecision"> Zapamti izbor za sljedece proracune
+      </label>
+      <div class="scrap-hint">Najcesce dostupni otpadi su trake do ~40cm i do 0.4m.</div>
+    </div>
+  `;
+}
+
+function renderPlanOutput(plan, suggestions, extraNote = '', includeDecisionPanel = false) {
+  const noteHtml = extraNote ? `<b>Napomena:</b> ${extraNote}<br><br>` : '';
+  const panelHtml = includeDecisionPanel && suggestions[0] ? renderScrapDecisionPanel(suggestions[0]) : '';
+  resultDiv.innerHTML = noteHtml + renderResult(plan.coilsResult, plan.originalParts) + panelHtml + renderScrapSuggestionsSummary(suggestions);
+}
+
+function bindScrapDecisionHandlers(basePlan, selectedSuggestion, allSuggestions) {
+  const acceptBtn = document.getElementById('acceptScrapBtn');
+  const declineBtn = document.getElementById('declineScrapBtn');
+  const rememberCheckbox = document.getElementById('rememberScrapDecision');
+  if (!acceptBtn || !declineBtn) return;
+
+  acceptBtn.addEventListener('click', () => {
+    if (rememberCheckbox?.checked) {
+      setScrapDecisionPreference('use');
+    }
+    renderPlanOutput(
+      selectedSuggestion.plan,
+      allSuggestions,
+      'Koristen je scenarij sa 1 komadom preuzetim sa otpada.',
+      false
+    );
+  });
+
+  declineBtn.addEventListener('click', () => {
+    if (rememberCheckbox?.checked) {
+      setScrapDecisionPreference('skip');
+    }
+    renderPlanOutput(basePlan, allSuggestions, 'Ostao je osnovni proracun bez komada sa otpada.', false);
+  });
+}
+
+function calculate() {
+  const partsData = getPartsFromUI();
+  if (partsData.error) {
+    resultDiv.innerHTML = `Greska: ${partsData.error}`;
+    return;
+  }
+
+  const enabledCoils = getEnabledCoils();
+  if (enabledCoils.length === 0) {
+    resultDiv.innerHTML = 'Greska: Niste odabrali nijedan lim.';
+    return;
+  }
+
+  const mode = optimizationModeSelect?.value || 'balanced';
+  const basePlan = solveCutPlan(partsData.parts, enabledCoils, mode);
+  if (basePlan.error) {
+    resultDiv.innerHTML = basePlan.error;
+    return;
+  }
+
+  const scrapSuggestions = findScrapSuggestions(basePlan.originalParts, enabledCoils, mode, basePlan.totalWasteM2);
+  const scrapSuggestion = scrapSuggestions[0] || null;
+  const pref = getScrapDecisionPreference();
+
+  if (scrapSuggestion && pref === 'use') {
+    renderPlanOutput(
+      scrapSuggestion.plan,
+      scrapSuggestions,
+      'Automatski je primijenjena zapamcena opcija: koristi komad sa otpada.',
+      false
+    );
+    return;
+  }
+
+  if (scrapSuggestion && pref !== 'skip') {
+    renderPlanOutput(basePlan, scrapSuggestions, '', true);
+    bindScrapDecisionHandlers(basePlan, scrapSuggestion, scrapSuggestions);
+    return;
+  }
+
+  const baseNote = scrapSuggestion && pref === 'skip'
+    ? 'Automatski je primijenjena zapamcena opcija: bez komada sa otpada.'
+    : '';
+  renderPlanOutput(basePlan, scrapSuggestions, baseNote, false);
 }
 
 document.addEventListener('DOMContentLoaded', () => {
