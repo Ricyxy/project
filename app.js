@@ -1,4 +1,4 @@
-﻿const coils = [
+const coils = [
   { width: 125, enabled: true },
   { width: 100, enabled: true },
   { width: 50, enabled: true },
@@ -22,59 +22,29 @@ const ADAPTIVE_BEAM_MAX = 6;
 const MAX_CANDIDATES_PER_STEP = 6;
 const POST_PASS_ROUNDS = 2;
 
-const DEFAULT_OPTIMIZATION_PROFILE = {
-  tableCountPenalty: 0.055,
-  lengthPenaltyWeight: 0.08,
-  remnantFragmentPenaltyWeight: 0.06,
-  compactRemnantBonusWeight: 0.1,
-  sideWastePenaltyWeight: 0.15,
-  localRemnantBonusWeight: 0.35,
-  stateRemainingWeight: 0.35,
-  remnantPotentialWeight: 0.18,
-  lowYieldPenaltyWeight: 0.16,
-  beamDepth: 2,
-  beamWidthBias: 0,
-  maxCandidatesPerStep: 6
-};
+const STATE_REMAINING_WEIGHT = 0.35;
+const REMNANT_POTENTIAL_WEIGHT = 0.18;
+const LOCAL_REMNANT_BONUS_WEIGHT = 0.35;
+const SIDE_WASTE_PENALTY_WEIGHT = 0.15;
 
 const OPTIMIZATION_PROFILES = {
   min_waste: {
-    tableCountPenalty: 0.028,
-    lengthPenaltyWeight: 0.025,
+    tableCountPenalty: 0.03,
+    lengthPenaltyWeight: 0.03,
     remnantFragmentPenaltyWeight: 0.02,
-    compactRemnantBonusWeight: 0.05,
-    sideWastePenaltyWeight: 0.16,
-    localRemnantBonusWeight: 0.44,
-    stateRemainingWeight: 0.42,
-    remnantPotentialWeight: 0.24,
-    lowYieldPenaltyWeight: 0.1,
-    beamDepth: 3,
-    beamWidthBias: 1,
-    maxCandidatesPerStep: 8
+    compactRemnantBonusWeight: 0.05
   },
   balanced: {
     tableCountPenalty: 0.055,
     lengthPenaltyWeight: 0.08,
     remnantFragmentPenaltyWeight: 0.06,
-    compactRemnantBonusWeight: 0.1,
-    lowYieldPenaltyWeight: 0.16,
-    beamDepth: 2,
-    beamWidthBias: 0,
-    maxCandidatesPerStep: 6
+    compactRemnantBonusWeight: 0.1
   },
   practical: {
-    tableCountPenalty: 0.11,
-    lengthPenaltyWeight: 0.21,
-    remnantFragmentPenaltyWeight: 0.16,
-    compactRemnantBonusWeight: 0.2,
-    sideWastePenaltyWeight: 0.22,
-    localRemnantBonusWeight: 0.24,
-    stateRemainingWeight: 0.26,
-    remnantPotentialWeight: 0.1,
-    lowYieldPenaltyWeight: 0.35,
-    beamDepth: 2,
-    beamWidthBias: -1,
-    maxCandidatesPerStep: 5
+    tableCountPenalty: 0.095,
+    lengthPenaltyWeight: 0.18,
+    remnantFragmentPenaltyWeight: 0.14,
+    compactRemnantBonusWeight: 0.18
   }
 };
 
@@ -526,18 +496,7 @@ function buildBestPatternForCoilAndLength(partsRemaining, coilWidth, tableLength
 }
 
 function getOptimizationProfile(mode) {
-  const modeProfile = OPTIMIZATION_PROFILES[mode] || OPTIMIZATION_PROFILES.balanced;
-  const merged = {
-    ...DEFAULT_OPTIMIZATION_PROFILE,
-    ...modeProfile
-  };
-
-  return {
-    ...merged,
-    beamDepth: Math.max(1, Math.round(merged.beamDepth)),
-    maxCandidatesPerStep: Math.max(1, Math.round(merged.maxCandidatesPerStep)),
-    beamWidthBias: Number.isFinite(merged.beamWidthBias) ? merged.beamWidthBias : 0
-  };
+  return OPTIMIZATION_PROFILES[mode] || OPTIMIZATION_PROFILES.balanced;
 }
 
 function computePatternShapeMetrics(pattern) {
@@ -560,11 +519,7 @@ function computePatternShapeMetrics(pattern) {
   };
 }
 
-function buildTableCandidates(partsRemaining, enabledCoils, dpCache, profile, limit = null, candidatesCache = null) {
-  const candidateLimit = Math.max(
-    1,
-    Math.round(Number.isFinite(limit) ? limit : profile.maxCandidatesPerStep)
-  );
+function buildTableCandidates(partsRemaining, enabledCoils, dpCache, profile, limit = MAX_CANDIDATES_PER_STEP, candidatesCache = null) {
   const partsSignature = buildPartsSignature(partsRemaining);
   if (candidatesCache && candidatesCache.has(partsSignature)) {
     return candidatesCache.get(partsSignature)
@@ -589,24 +544,18 @@ function buildTableCandidates(partsRemaining, enabledCoils, dpCache, profile, li
       const lengthPenalty = profile.lengthPenaltyWeight * (pattern.maxLength / MAX_TABLE_LENGTH);
       const fragmentationPenalty = profile.remnantFragmentPenaltyWeight * shapeMetrics.normalizedFragmentation;
       const compactRemnantBonus = profile.compactRemnantBonusWeight * shapeMetrics.compactnessRatio;
-      const producedShare = Math.min(1, pattern.producedArea / Math.max(remainingDemandAreaCm, EPS));
-      const lowYieldPenalty = profile.lowYieldPenaltyWeight * Math.pow(Math.max(0, 1 - producedShare), 2);
       const adjustedWastePerProduced =
-        ((pattern.wasteArea +
-        (profile.sideWastePenaltyWeight * sideWasteArea) -
-        (profile.localRemnantBonusWeight * usefulRemnantArea)) /
+        ((pattern.wasteArea + (SIDE_WASTE_PENALTY_WEIGHT * sideWasteArea) - (LOCAL_REMNANT_BONUS_WEIGHT * usefulRemnantArea)) /
         Math.max(pattern.producedArea, EPS)) +
         lengthPenalty +
         fragmentationPenalty -
-        compactRemnantBonus +
-        lowYieldPenalty;
+        compactRemnantBonus;
 
       candidateEntries.push({
         pattern,
         metrics: {
           usefulRemnantArea,
           sideWasteArea,
-          lowYieldPenalty,
           adjustedWastePerProduced,
           shapeMetrics
         }
@@ -655,9 +604,9 @@ function scoreSolverState(state, totalRequiredAreaCm, profile) {
   const normalizedPotential = remnantPotential / norm;
 
   return normalizedWaste +
-    (profile.stateRemainingWeight * normalizedRemaining) +
+    (STATE_REMAINING_WEIGHT * normalizedRemaining) +
     (profile.tableCountPenalty * state.tableCount) -
-    (profile.remnantPotentialWeight * normalizedPotential);
+    (REMNANT_POTENTIAL_WEIGHT * normalizedPotential);
 }
 
 function computeAdaptiveBeamWidth(partsRemaining, remnantStrips, profile) {
@@ -669,7 +618,7 @@ function computeAdaptiveBeamWidth(partsRemaining, remnantStrips, profile) {
 
 
 function chooseNextTableByBeam(baseState, enabledCoils, dpCache, totalRequiredAreaCm, profile, candidatesCache) {
-  const beamWidth = computeAdaptiveBeamWidth(baseState.partsRemaining, baseState.remnantStrips, profile);
+  const beamWidth = computeAdaptiveBeamWidth(baseState.partsRemaining, baseState.remnantStrips);
   let frontier = [{ state: cloneSolverState(baseState), firstPattern: null, score: Infinity }];
 
   for (let depth = 0; depth < profile.beamDepth; depth++) {
@@ -691,7 +640,7 @@ function chooseNextTableByBeam(baseState, enabledCoils, dpCache, totalRequiredAr
         enabledCoils,
         dpCache,
         profile,
-        profile.maxCandidatesPerStep,
+        MAX_CANDIDATES_PER_STEP,
         candidatesCache
       );
       candidates.forEach((entry) => {
@@ -1075,8 +1024,8 @@ function findUnplaceablePart(partsRemaining, enabledCoils) {
   return partsRemaining.find((p) => p.qty > 0 && (p.width > maxCoilWidth + EPS || p.length > MAX_TABLE_LENGTH + EPS));
 }
 
-function solveCutPlan(partsInput, enabledCoils, mode = 'balanced', originalPartsReference = null) {
-  const profile = getOptimizationProfile(mode);
+function solveCutPlan(partsInput, enabledCoils, originalPartsReference = null) {
+  const optimizationProfile = getOptimizationProfile(optimizationModeSelect?.value || 'balanced');
   const originalParts = originalPartsReference
     ? originalPartsReference.map((p) => ({ ...p }))
     : partsInput.map((p) => ({ ...p }));
@@ -1110,9 +1059,9 @@ function solveCutPlan(partsInput, enabledCoils, mode = 'balanced', originalParts
       enabledCoils,
       dpCache,
       totalRequiredAreaCm,
-      profile,
+      optimizationProfile,
       candidatesCache
-    ) || buildBestTable(solverState.partsRemaining, enabledCoils, dpCache, profile, candidatesCache);
+    ) || buildBestTable(solverState.partsRemaining, enabledCoils, dpCache, optimizationProfile, candidatesCache);
 
     if (!bestTable) {
       const bad = findUnplaceablePart(solverState.partsRemaining, enabledCoils);
@@ -1161,7 +1110,7 @@ function getScrapAvailabilityScore(part) {
   return 0;
 }
 
-function findScrapSuggestions(originalParts, enabledCoils, mode, baseWasteM2) {
+function findScrapSuggestions(originalParts, enabledCoils, baseWasteM2) {
   const suggestions = [];
 
   originalParts.forEach((part, idx) => {
@@ -1174,7 +1123,7 @@ function findScrapSuggestions(originalParts, enabledCoils, mode, baseWasteM2) {
 
     if (reducedParts[idx].qty === part.qty) return;
 
-    const variantResult = solveCutPlan(reducedParts, enabledCoils, mode, originalParts);
+    const variantResult = solveCutPlan(reducedParts, enabledCoils, originalParts);
     if (variantResult.error) return;
 
     const savedWaste = baseWasteM2 - variantResult.totalWasteM2;
@@ -1300,14 +1249,13 @@ function calculate() {
     return;
   }
 
-  const mode = optimizationModeSelect?.value || 'balanced';
-  const basePlan = solveCutPlan(partsData.parts, enabledCoils, mode);
+  const basePlan = solveCutPlan(partsData.parts, enabledCoils);
   if (basePlan.error) {
     resultDiv.innerHTML = basePlan.error;
     return;
   }
 
-  const scrapSuggestions = findScrapSuggestions(basePlan.originalParts, enabledCoils, mode, basePlan.totalWasteM2);
+  const scrapSuggestions = findScrapSuggestions(basePlan.originalParts, enabledCoils, basePlan.totalWasteM2);
   const scrapSuggestion = scrapSuggestions[0] || null;
   const pref = getScrapDecisionPreference();
 
@@ -1343,3 +1291,4 @@ document.addEventListener('DOMContentLoaded', () => {
 
   calcBtn.addEventListener('click', calculate);
 });
+
