@@ -248,6 +248,55 @@ button:active {
   color: #16232b;
 }
 
+.scrap-panel {
+  margin-top: 14px;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(11, 122, 88, 0.35);
+  background: rgba(11, 122, 88, 0.08);
+}
+
+.scrap-panel-actions {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.scrap-panel-actions button {
+  padding: 9px 12px;
+}
+
+.scrap-accept {
+  color: #fff;
+  background: linear-gradient(135deg, var(--brand), var(--brand-strong));
+}
+
+.scrap-decline {
+  color: #fff;
+  background: linear-gradient(135deg, #697982, #4f5f68);
+}
+
+.scrap-remember {
+  margin-top: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.88rem;
+  color: #23313a;
+}
+
+.scrap-remember input {
+  width: 16px;
+  height: 16px;
+}
+
+.scrap-hint {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
 .table-visual {
   display: flex;
   align-items: center;

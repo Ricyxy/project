@@ -8,6 +8,11 @@
 ];
 
 const MAX_TABLE_LENGTH = 8;
+const MAX_SCRAP_LENGTH_M = 1;
+const COMMON_SCRAP_MAX_LENGTH_M = 0.4;
+const COMMON_SCRAP_MAX_WIDTH_CM = 40;
+const MAX_SCRAP_SUGGESTIONS = 3;
+const SCRAP_PREF_KEY = 'scrapDecisionPreference';
 const WIDTH_SCALE = 10; // 0.1 cm precision
 const EPS = 1e-9;
 const BEAM_WIDTH = 3;
@@ -964,27 +969,17 @@ function findUnplaceablePart(partsRemaining, enabledCoils) {
   return partsRemaining.find((p) => p.qty > 0 && (p.width > maxCoilWidth + EPS || p.length > MAX_TABLE_LENGTH + EPS));
 }
 
-function calculate() {
-  const partsData = getPartsFromUI();
-  if (partsData.error) {
-    resultDiv.innerHTML = `Greska: ${partsData.error}`;
-    return;
-  }
-
-  const enabledCoils = getEnabledCoils();
-  if (enabledCoils.length === 0) {
-    resultDiv.innerHTML = 'Greska: Niste odabrali nijedan lim.';
-    return;
-  }
-
-  const originalParts = partsData.parts.map((p) => ({ ...p }));
+function solveCutPlan(partsInput, enabledCoils, originalPartsReference = null) {
+  const originalParts = originalPartsReference
+    ? originalPartsReference.map((p) => ({ ...p }))
+    : partsInput.map((p) => ({ ...p }));
   const coilsResult = enabledCoils.map((c) => ({ coilWidth: c.coilWidth, tables: [] }));
-  const totalRequiredAreaCm = computeRemainingAreaCm(originalParts);
+  const totalRequiredAreaCm = computeRemainingAreaCm(partsInput);
   const dpCache = new Map();
   const candidatesCache = new Map();
 
   const solverState = {
-    partsRemaining: partsData.parts.map((p) => ({ ...p })),
+    partsRemaining: partsInput.map((p) => ({ ...p })),
     remnantStrips: [],
     remnantOrder: 0,
     openedAreaCm: 0,
@@ -995,8 +990,9 @@ function calculate() {
   while (solverState.partsRemaining.some((p) => p.qty > 0)) {
     guard += 1;
     if (guard > 5000) {
-      resultDiv.innerHTML = 'Greska: Prekinuto zbog previse iteracija (provjerite ulazne podatke).';
-      return;
+      return {
+        error: 'Greska: Prekinuto zbog previse iteracija (provjerite ulazne podatke).'
+      };
     }
 
     placePartsIntoRemnants(solverState.partsRemaining, solverState.remnantStrips);
@@ -1013,11 +1009,13 @@ function calculate() {
     if (!bestTable) {
       const bad = findUnplaceablePart(solverState.partsRemaining, enabledCoils);
       if (bad) {
-        resultDiv.innerHTML = `Greska: Dio ${bad.width}cm x ${bad.length}m ne moze stati u dostupne limove.`;
-      } else {
-        resultDiv.innerHTML = 'Greska: Nije pronadjeno validno rjesenje za preostale dijelove.';
+        return {
+          error: `Greska: Dio ${bad.width}cm x ${bad.length}m ne moze stati u dostupne limove.`
+        };
       }
-      return;
+      return {
+        error: 'Greska: Nije pronadjeno validno rjesenje za preostale dijelove.'
+      };
     }
 
     applyTable(solverState.partsRemaining, bestTable);
@@ -1032,7 +1030,198 @@ function calculate() {
   }
 
   runPostOptimization(coilsResult);
-  resultDiv.innerHTML = renderResult(coilsResult, originalParts);
+  const totalWasteM2 = collectTableRefs(coilsResult).reduce((sum, ref) => sum + (ref.wasteAreaCm / 100), 0);
+
+  return {
+    coilsResult,
+    originalParts,
+    totalWasteM2
+  };
+}
+
+function isScrapCandidatePart(part) {
+  return part.qty > 0 && part.length <= MAX_SCRAP_LENGTH_M + EPS;
+}
+
+function getScrapAvailabilityScore(part) {
+  if (part.length <= COMMON_SCRAP_MAX_LENGTH_M + EPS && part.width <= COMMON_SCRAP_MAX_WIDTH_CM + EPS) {
+    return 2;
+  }
+  if (part.length <= MAX_SCRAP_LENGTH_M + EPS) {
+    return 1;
+  }
+  return 0;
+}
+
+function findScrapSuggestions(originalParts, enabledCoils, baseWasteM2) {
+  const suggestions = [];
+
+  originalParts.forEach((part, idx) => {
+    if (!isScrapCandidatePart(part)) return;
+
+    const reducedParts = originalParts.map((p, pIdx) => ({
+      ...p,
+      qty: pIdx === idx ? Math.max(0, p.qty - 1) : p.qty
+    }));
+
+    if (reducedParts[idx].qty === part.qty) return;
+
+    const variantResult = solveCutPlan(reducedParts, enabledCoils, originalParts);
+    if (variantResult.error) return;
+
+    const savedWaste = baseWasteM2 - variantResult.totalWasteM2;
+    if (savedWaste <= EPS) return;
+
+    suggestions.push({
+      part,
+      partIndex: idx,
+      reducedParts,
+      savedWasteM2: savedWaste,
+      availabilityScore: getScrapAvailabilityScore(part),
+      plan: variantResult
+    });
+  });
+
+  suggestions.sort((a, b) => {
+    if (a.availabilityScore !== b.availabilityScore) {
+      return b.availabilityScore - a.availabilityScore;
+    }
+    if (Math.abs(a.savedWasteM2 - b.savedWasteM2) > EPS) {
+      return b.savedWasteM2 - a.savedWasteM2;
+    }
+    return a.part.width - b.part.width;
+  });
+
+  return suggestions.slice(0, MAX_SCRAP_SUGGESTIONS);
+}
+
+function renderScrapSuggestionsSummary(suggestions) {
+  if (!suggestions.length) return '';
+
+  const labelByScore = {
+    2: 'vrlo cest otpad (do 40cm i do 0.4m)',
+    1: 'moguc otpad (do 1m)',
+    0: 'rijedji otpad'
+  };
+
+  const itemsHtml = suggestions.map((s, idx) => (
+    `<li>#${idx + 1} ${s.part.width}cm x ${s.part.length}m, usteda otpada ~${s.savedWasteM2.toFixed(3)} m2 (${labelByScore[s.availabilityScore]})</li>`
+  )).join('');
+
+  return `<br><b>Predlozeni komadi sa otpada:</b><ul>${itemsHtml}</ul>`;
+}
+
+function getScrapDecisionPreference() {
+  try {
+    const value = window.localStorage.getItem(SCRAP_PREF_KEY);
+    return value === 'use' || value === 'skip' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function setScrapDecisionPreference(value) {
+  try {
+    if (value === 'use' || value === 'skip') {
+      window.localStorage.setItem(SCRAP_PREF_KEY, value);
+    }
+  } catch {
+    // ignore storage issues (private mode, blocked storage)
+  }
+}
+
+function renderScrapDecisionPanel(suggestion) {
+  return `
+    <div class="scrap-panel">
+      <b>Prijedlog otpada:</b> Mozete li pronaci 1 komad ${suggestion.part.width} cm x ${suggestion.part.length} m?<br>
+      Procijenjeno smanjenje otpada: <b>${suggestion.savedWasteM2.toFixed(3)} m2</b>.
+      <div class="scrap-panel-actions">
+        <button type="button" id="acceptScrapBtn" class="scrap-accept">Imam taj komad</button>
+        <button type="button" id="declineScrapBtn" class="scrap-decline">Nemam, ostavi osnovni plan</button>
+      </div>
+      <label class="scrap-remember">
+        <input type="checkbox" id="rememberScrapDecision"> Zapamti izbor za sljedece proracune
+      </label>
+      <div class="scrap-hint">Najcesce dostupni otpadi su trake do ~40cm i do 0.4m.</div>
+    </div>
+  `;
+}
+
+function renderPlanOutput(plan, suggestions, extraNote = '', includeDecisionPanel = false) {
+  const noteHtml = extraNote ? `<b>Napomena:</b> ${extraNote}<br><br>` : '';
+  const panelHtml = includeDecisionPanel && suggestions[0] ? renderScrapDecisionPanel(suggestions[0]) : '';
+  resultDiv.innerHTML = noteHtml + renderResult(plan.coilsResult, plan.originalParts) + panelHtml + renderScrapSuggestionsSummary(suggestions);
+}
+
+function bindScrapDecisionHandlers(basePlan, selectedSuggestion, allSuggestions) {
+  const acceptBtn = document.getElementById('acceptScrapBtn');
+  const declineBtn = document.getElementById('declineScrapBtn');
+  const rememberCheckbox = document.getElementById('rememberScrapDecision');
+  if (!acceptBtn || !declineBtn) return;
+
+  acceptBtn.addEventListener('click', () => {
+    if (rememberCheckbox?.checked) {
+      setScrapDecisionPreference('use');
+    }
+    renderPlanOutput(
+      selectedSuggestion.plan,
+      allSuggestions,
+      'Koristen je scenarij sa 1 komadom preuzetim sa otpada.',
+      false
+    );
+  });
+
+  declineBtn.addEventListener('click', () => {
+    if (rememberCheckbox?.checked) {
+      setScrapDecisionPreference('skip');
+    }
+    renderPlanOutput(basePlan, allSuggestions, 'Ostao je osnovni proracun bez komada sa otpada.', false);
+  });
+}
+
+function calculate() {
+  const partsData = getPartsFromUI();
+  if (partsData.error) {
+    resultDiv.innerHTML = `Greska: ${partsData.error}`;
+    return;
+  }
+
+  const enabledCoils = getEnabledCoils();
+  if (enabledCoils.length === 0) {
+    resultDiv.innerHTML = 'Greska: Niste odabrali nijedan lim.';
+    return;
+  }
+
+  const basePlan = solveCutPlan(partsData.parts, enabledCoils);
+  if (basePlan.error) {
+    resultDiv.innerHTML = basePlan.error;
+    return;
+  }
+
+  const scrapSuggestions = findScrapSuggestions(basePlan.originalParts, enabledCoils, basePlan.totalWasteM2);
+  const scrapSuggestion = scrapSuggestions[0] || null;
+  const pref = getScrapDecisionPreference();
+
+  if (scrapSuggestion && pref === 'use') {
+    renderPlanOutput(
+      scrapSuggestion.plan,
+      scrapSuggestions,
+      'Automatski je primijenjena zapamcena opcija: koristi komad sa otpada.',
+      false
+    );
+    return;
+  }
+
+  if (scrapSuggestion && pref !== 'skip') {
+    renderPlanOutput(basePlan, scrapSuggestions, '', true);
+    bindScrapDecisionHandlers(basePlan, scrapSuggestion, scrapSuggestions);
+    return;
+  }
+
+  const baseNote = scrapSuggestion && pref === 'skip'
+    ? 'Automatski je primijenjena zapamcena opcija: bez komada sa otpada.'
+    : '';
+  renderPlanOutput(basePlan, scrapSuggestions, baseNote, false);
 }
 
 document.addEventListener('DOMContentLoaded', () => {
