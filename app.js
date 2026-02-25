@@ -16,35 +16,67 @@ const SCRAP_PREF_KEY = 'scrapDecisionPreference';
 const WIDTH_SCALE = 10; // 0.1 cm precision
 const EPS = 1e-9;
 const BEAM_WIDTH = 3;
-const BEAM_DEPTH = 2;
 const ADAPTIVE_BEAM_MIN = 2;
 const ADAPTIVE_BEAM_MAX = 6;
-const MAX_CANDIDATES_PER_STEP = 6;
 const POST_PASS_ROUNDS = 2;
 
-const STATE_REMAINING_WEIGHT = 0.35;
-const REMNANT_POTENTIAL_WEIGHT = 0.18;
-const LOCAL_REMNANT_BONUS_WEIGHT = 0.35;
-const SIDE_WASTE_PENALTY_WEIGHT = 0.15;
+const DEFAULT_OPTIMIZATION_PROFILE = {
+  tableCountPenalty: 0.055,
+  lengthPenaltyWeight: 0.08,
+  remnantFragmentPenaltyWeight: 0.06,
+  compactRemnantBonusWeight: 0.1,
+  sideWastePenaltyWeight: 0.15,
+  localRemnantBonusWeight: 0.35,
+  stateRemainingWeight: 0.35,
+  remnantPotentialWeight: 0.18,
+  lowYieldPenaltyWeight: 0.12,
+  beamDepth: 2,
+  beamWidthBias: 0,
+  maxCandidatesPerStep: 6
+};
 
 const OPTIMIZATION_PROFILES = {
   min_waste: {
     tableCountPenalty: 0.03,
     lengthPenaltyWeight: 0.03,
     remnantFragmentPenaltyWeight: 0.02,
-    compactRemnantBonusWeight: 0.05
+    compactRemnantBonusWeight: 0.05,
+    sideWastePenaltyWeight: 0.22,
+    localRemnantBonusWeight: 0.45,
+    stateRemainingWeight: 0.42,
+    remnantPotentialWeight: 0.24,
+    lowYieldPenaltyWeight: 0.06,
+    beamDepth: 3,
+    beamWidthBias: 1,
+    maxCandidatesPerStep: 8
   },
   balanced: {
     tableCountPenalty: 0.055,
     lengthPenaltyWeight: 0.08,
     remnantFragmentPenaltyWeight: 0.06,
-    compactRemnantBonusWeight: 0.1
+    compactRemnantBonusWeight: 0.1,
+    sideWastePenaltyWeight: 0.15,
+    localRemnantBonusWeight: 0.35,
+    stateRemainingWeight: 0.35,
+    remnantPotentialWeight: 0.18,
+    lowYieldPenaltyWeight: 0.12,
+    beamDepth: 2,
+    beamWidthBias: 0,
+    maxCandidatesPerStep: 6
   },
   practical: {
     tableCountPenalty: 0.095,
     lengthPenaltyWeight: 0.18,
     remnantFragmentPenaltyWeight: 0.14,
-    compactRemnantBonusWeight: 0.18
+    compactRemnantBonusWeight: 0.18,
+    sideWastePenaltyWeight: 0.1,
+    localRemnantBonusWeight: 0.2,
+    stateRemainingWeight: 0.25,
+    remnantPotentialWeight: 0.1,
+    lowYieldPenaltyWeight: 0.3,
+    beamDepth: 2,
+    beamWidthBias: -1,
+    maxCandidatesPerStep: 5
   }
 };
 
@@ -496,7 +528,18 @@ function buildBestPatternForCoilAndLength(partsRemaining, coilWidth, tableLength
 }
 
 function getOptimizationProfile(mode) {
-  return OPTIMIZATION_PROFILES[mode] || OPTIMIZATION_PROFILES.balanced;
+  const modeProfile = OPTIMIZATION_PROFILES[mode] || OPTIMIZATION_PROFILES.balanced;
+  const merged = {
+    ...DEFAULT_OPTIMIZATION_PROFILE,
+    ...modeProfile
+  };
+
+  return {
+    ...merged,
+    beamDepth: Math.max(1, Math.round(merged.beamDepth)),
+    maxCandidatesPerStep: Math.max(1, Math.round(merged.maxCandidatesPerStep)),
+    beamWidthBias: Number.isFinite(merged.beamWidthBias) ? merged.beamWidthBias : 0
+  };
 }
 
 function computePatternShapeMetrics(pattern) {
@@ -519,7 +562,11 @@ function computePatternShapeMetrics(pattern) {
   };
 }
 
-function buildTableCandidates(partsRemaining, enabledCoils, dpCache, profile, limit = MAX_CANDIDATES_PER_STEP, candidatesCache = null) {
+function buildTableCandidates(partsRemaining, enabledCoils, dpCache, profile, limit = null, candidatesCache = null) {
+  const candidateLimit = Math.max(
+    1,
+    Math.round(Number.isFinite(limit) ? limit : profile.maxCandidatesPerStep)
+  );
   const partsSignature = buildPartsSignature(partsRemaining);
   if (candidatesCache && candidatesCache.has(partsSignature)) {
     return candidatesCache.get(partsSignature)
@@ -544,18 +591,24 @@ function buildTableCandidates(partsRemaining, enabledCoils, dpCache, profile, li
       const lengthPenalty = profile.lengthPenaltyWeight * (pattern.maxLength / MAX_TABLE_LENGTH);
       const fragmentationPenalty = profile.remnantFragmentPenaltyWeight * shapeMetrics.normalizedFragmentation;
       const compactRemnantBonus = profile.compactRemnantBonusWeight * shapeMetrics.compactnessRatio;
+      const producedShare = Math.min(1, pattern.producedArea / Math.max(remainingDemandAreaCm, EPS));
+      const lowYieldPenalty = profile.lowYieldPenaltyWeight * Math.pow(Math.max(0, 1 - producedShare), 2);
       const adjustedWastePerProduced =
-        ((pattern.wasteArea + (SIDE_WASTE_PENALTY_WEIGHT * sideWasteArea) - (LOCAL_REMNANT_BONUS_WEIGHT * usefulRemnantArea)) /
+        ((pattern.wasteArea +
+        (profile.sideWastePenaltyWeight * sideWasteArea) -
+        (profile.localRemnantBonusWeight * usefulRemnantArea)) /
         Math.max(pattern.producedArea, EPS)) +
         lengthPenalty +
         fragmentationPenalty -
-        compactRemnantBonus;
+        compactRemnantBonus +
+        lowYieldPenalty;
 
       candidateEntries.push({
         pattern,
         metrics: {
           usefulRemnantArea,
           sideWasteArea,
+          lowYieldPenalty,
           adjustedWastePerProduced,
           shapeMetrics
         }
@@ -604,9 +657,9 @@ function scoreSolverState(state, totalRequiredAreaCm, profile) {
   const normalizedPotential = remnantPotential / norm;
 
   return normalizedWaste +
-    (STATE_REMAINING_WEIGHT * normalizedRemaining) +
+    (profile.stateRemainingWeight * normalizedRemaining) +
     (profile.tableCountPenalty * state.tableCount) -
-    (REMNANT_POTENTIAL_WEIGHT * normalizedPotential);
+    (profile.remnantPotentialWeight * normalizedPotential);
 }
 
 function computeAdaptiveBeamWidth(partsRemaining, remnantStrips, profile) {
@@ -618,7 +671,7 @@ function computeAdaptiveBeamWidth(partsRemaining, remnantStrips, profile) {
 
 
 function chooseNextTableByBeam(baseState, enabledCoils, dpCache, totalRequiredAreaCm, profile, candidatesCache) {
-  const beamWidth = computeAdaptiveBeamWidth(baseState.partsRemaining, baseState.remnantStrips);
+  const beamWidth = computeAdaptiveBeamWidth(baseState.partsRemaining, baseState.remnantStrips, profile);
   let frontier = [{ state: cloneSolverState(baseState), firstPattern: null, score: Infinity }];
 
   for (let depth = 0; depth < profile.beamDepth; depth++) {
@@ -640,7 +693,7 @@ function chooseNextTableByBeam(baseState, enabledCoils, dpCache, totalRequiredAr
         enabledCoils,
         dpCache,
         profile,
-        MAX_CANDIDATES_PER_STEP,
+        profile.maxCandidatesPerStep,
         candidatesCache
       );
       candidates.forEach((entry) => {
