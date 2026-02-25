@@ -1023,8 +1023,7 @@ function findUnplaceablePart(partsRemaining, enabledCoils) {
   return partsRemaining.find((p) => p.qty > 0 && (p.width > maxCoilWidth + EPS || p.length > MAX_TABLE_LENGTH + EPS));
 }
 
-function solveCutPlan(partsInput, enabledCoils, mode = 'balanced', originalPartsReference = null) {
-  const profile = getOptimizationProfile(mode);
+function solveCutPlan(partsInput, enabledCoils, originalPartsReference = null) {
   const originalParts = originalPartsReference
     ? originalPartsReference.map((p) => ({ ...p }))
     : partsInput.map((p) => ({ ...p }));
@@ -1109,7 +1108,7 @@ function getScrapAvailabilityScore(part) {
   return 0;
 }
 
-function findScrapSuggestions(originalParts, enabledCoils, mode, baseWasteM2) {
+function findScrapSuggestions(originalParts, enabledCoils, baseWasteM2) {
   const suggestions = [];
 
   originalParts.forEach((part, idx) => {
@@ -1122,7 +1121,7 @@ function findScrapSuggestions(originalParts, enabledCoils, mode, baseWasteM2) {
 
     if (reducedParts[idx].qty === part.qty) return;
 
-    const variantResult = solveCutPlan(reducedParts, enabledCoils, mode, originalParts);
+    const variantResult = solveCutPlan(reducedParts, enabledCoils, originalParts);
     if (variantResult.error) return;
 
     const savedWaste = baseWasteM2 - variantResult.totalWasteM2;
@@ -1248,14 +1247,13 @@ function calculate() {
     return;
   }
 
-  const mode = optimizationModeSelect?.value || 'balanced';
-  const basePlan = solveCutPlan(partsData.parts, enabledCoils, mode);
+  const basePlan = solveCutPlan(partsData.parts, enabledCoils);
   if (basePlan.error) {
     resultDiv.innerHTML = basePlan.error;
     return;
   }
 
-  const scrapSuggestions = findScrapSuggestions(basePlan.originalParts, enabledCoils, mode, basePlan.totalWasteM2);
+  const scrapSuggestions = findScrapSuggestions(basePlan.originalParts, enabledCoils, basePlan.totalWasteM2);
   const scrapSuggestion = scrapSuggestions[0] || null;
   const pref = getScrapDecisionPreference();
 
