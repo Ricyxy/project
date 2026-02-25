@@ -12,6 +12,8 @@ const WIDTH_SCALE = 10; // 0.1 cm precision
 const EPS = 1e-9;
 const BEAM_WIDTH = 3;
 const BEAM_DEPTH = 2;
+const ADAPTIVE_BEAM_MIN = 2;
+const ADAPTIVE_BEAM_MAX = 6;
 const MAX_CANDIDATES_PER_STEP = 6;
 const POST_PASS_ROUNDS = 2;
 
@@ -116,13 +118,25 @@ function bindExistingRemoveButtons() {
   });
 }
 
+
+function normalizePartOrientation(part) {
+  const widthM = part.width / 100;
+  if (widthM <= part.length + EPS) return part;
+
+  return {
+    ...part,
+    width: part.length * 100,
+    length: round3(widthM)
+  };
+}
+
 function getPartsFromUI() {
   const rows = Array.from(document.querySelectorAll('.partRow'));
   if (rows.length === 0) {
     return { error: 'Dodajte barem jedan dio.' };
   }
 
-  const parts = rows.map((row) => ({
+  const parts = rows.map((row) => normalizePartOrientation({
     width: Number(row.querySelector('.partWidth').value),
     length: Number(row.querySelector('.partLength').value),
     qty: Number(row.querySelector('.quantity').value)
@@ -177,6 +191,13 @@ function clonePattern(pattern) {
   return {
     ...pattern,
     strips: pattern.strips.map((s) => ({ ...s }))
+  };
+}
+
+function cloneCandidateEntry(entry) {
+  return {
+    pattern: clonePattern(entry.pattern),
+    metrics: { ...entry.metrics }
   };
 }
 
@@ -448,7 +469,14 @@ function buildBestPatternForCoilAndLength(partsRemaining, coilWidth, tableLength
   return clonePattern(pattern);
 }
 
-function buildTableCandidates(partsRemaining, enabledCoils, dpCache, limit = MAX_CANDIDATES_PER_STEP) {
+function buildTableCandidates(partsRemaining, enabledCoils, dpCache, limit = MAX_CANDIDATES_PER_STEP, candidatesCache = null) {
+  const partsSignature = buildPartsSignature(partsRemaining);
+  if (candidatesCache && candidatesCache.has(partsSignature)) {
+    return candidatesCache.get(partsSignature)
+      .slice(0, limit)
+      .map((entry) => cloneCandidateEntry(entry));
+  }
+
   const lengthCandidates = buildLengthCandidates(partsRemaining);
   const candidateEntries = [];
 
@@ -492,11 +520,16 @@ function buildTableCandidates(partsRemaining, enabledCoils, dpCache, limit = MAX
     return pa.remainingWidth - pb.remainingWidth;
   });
 
-  return candidateEntries.slice(0, limit);
+  const trimmed = candidateEntries.slice(0, Math.max(limit, MAX_CANDIDATES_PER_STEP));
+  if (candidatesCache) {
+    candidatesCache.set(partsSignature, trimmed.map((entry) => cloneCandidateEntry(entry)));
+  }
+
+  return trimmed.slice(0, limit).map((entry) => cloneCandidateEntry(entry));
 }
 
-function buildBestTable(partsRemaining, enabledCoils, dpCache) {
-  const candidates = buildTableCandidates(partsRemaining, enabledCoils, dpCache, 1);
+function buildBestTable(partsRemaining, enabledCoils, dpCache, candidatesCache) {
+  const candidates = buildTableCandidates(partsRemaining, enabledCoils, dpCache, 1, candidatesCache);
   return candidates.length > 0 ? candidates[0].pattern : null;
 }
 
@@ -517,7 +550,16 @@ function scoreSolverState(state, totalRequiredAreaCm) {
     (REMNANT_POTENTIAL_WEIGHT * normalizedPotential);
 }
 
-function chooseNextTableByBeam(baseState, enabledCoils, dpCache, totalRequiredAreaCm) {
+function computeAdaptiveBeamWidth(partsRemaining, remnantStrips) {
+  const activePartKinds = partsRemaining.reduce((sum, p) => sum + (p.qty > 0 ? 1 : 0), 0);
+  const remnantPressure = Math.min(3, Math.floor(remnantStrips.length / 4));
+  const dynamicWidth = BEAM_WIDTH + Math.floor(activePartKinds / 2) + remnantPressure;
+  return Math.max(ADAPTIVE_BEAM_MIN, Math.min(ADAPTIVE_BEAM_MAX, dynamicWidth));
+}
+
+
+function chooseNextTableByBeam(baseState, enabledCoils, dpCache, totalRequiredAreaCm, candidatesCache) {
+  const beamWidth = computeAdaptiveBeamWidth(baseState.partsRemaining, baseState.remnantStrips);
   let frontier = [{ state: cloneSolverState(baseState), firstPattern: null, score: Infinity }];
 
   for (let depth = 0; depth < BEAM_DEPTH; depth++) {
@@ -538,7 +580,8 @@ function chooseNextTableByBeam(baseState, enabledCoils, dpCache, totalRequiredAr
         node.state.partsRemaining,
         enabledCoils,
         dpCache,
-        MAX_CANDIDATES_PER_STEP
+        MAX_CANDIDATES_PER_STEP,
+        candidatesCache
       );
       candidates.forEach((entry) => {
         const childState = cloneSolverState(node.state);
@@ -559,7 +602,7 @@ function chooseNextTableByBeam(baseState, enabledCoils, dpCache, totalRequiredAr
 
     if (expanded.length === 0) break;
     expanded.sort((a, b) => a.score - b.score);
-    frontier = expanded.slice(0, BEAM_WIDTH);
+    frontier = expanded.slice(0, beamWidth);
   }
 
   if (frontier.length === 0) return null;
@@ -938,6 +981,7 @@ function calculate() {
   const coilsResult = enabledCoils.map((c) => ({ coilWidth: c.coilWidth, tables: [] }));
   const totalRequiredAreaCm = computeRemainingAreaCm(originalParts);
   const dpCache = new Map();
+  const candidatesCache = new Map();
 
   const solverState = {
     partsRemaining: partsData.parts.map((p) => ({ ...p })),
@@ -962,8 +1006,9 @@ function calculate() {
       solverState,
       enabledCoils,
       dpCache,
-      totalRequiredAreaCm
-    ) || buildBestTable(solverState.partsRemaining, enabledCoils, dpCache);
+      totalRequiredAreaCm,
+      candidatesCache
+    ) || buildBestTable(solverState.partsRemaining, enabledCoils, dpCache, candidatesCache);
 
     if (!bestTable) {
       const bad = findUnplaceablePart(solverState.partsRemaining, enabledCoils);
