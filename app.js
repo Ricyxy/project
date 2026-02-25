@@ -523,10 +523,11 @@ function buildTableCandidates(partsRemaining, enabledCoils, dpCache, profile, li
   const partsSignature = buildPartsSignature(partsRemaining);
   if (candidatesCache && candidatesCache.has(partsSignature)) {
     return candidatesCache.get(partsSignature)
-      .slice(0, limit)
+      .slice(0, candidateLimit)
       .map((entry) => cloneCandidateEntry(entry));
   }
 
+  const remainingDemandAreaCm = computeRemainingAreaCm(partsRemaining);
   const lengthCandidates = buildLengthCandidates(partsRemaining);
   const candidateEntries = [];
 
@@ -578,12 +579,12 @@ function buildTableCandidates(partsRemaining, enabledCoils, dpCache, profile, li
     return pa.remainingWidth - pb.remainingWidth;
   });
 
-  const trimmed = candidateEntries.slice(0, Math.max(limit, MAX_CANDIDATES_PER_STEP));
+  const trimmed = candidateEntries.slice(0, Math.max(candidateLimit, profile.maxCandidatesPerStep));
   if (candidatesCache) {
     candidatesCache.set(partsSignature, trimmed.map((entry) => cloneCandidateEntry(entry)));
   }
 
-  return trimmed.slice(0, limit).map((entry) => cloneCandidateEntry(entry));
+  return trimmed.slice(0, candidateLimit).map((entry) => cloneCandidateEntry(entry));
 }
 
 function buildBestTable(partsRemaining, enabledCoils, dpCache, profile, candidatesCache) {
@@ -608,11 +609,11 @@ function scoreSolverState(state, totalRequiredAreaCm, profile) {
     (REMNANT_POTENTIAL_WEIGHT * normalizedPotential);
 }
 
-function computeAdaptiveBeamWidth(partsRemaining, remnantStrips) {
+function computeAdaptiveBeamWidth(partsRemaining, remnantStrips, profile) {
   const activePartKinds = partsRemaining.reduce((sum, p) => sum + (p.qty > 0 ? 1 : 0), 0);
   const remnantPressure = Math.min(3, Math.floor(remnantStrips.length / 4));
-  const dynamicWidth = BEAM_WIDTH + Math.floor(activePartKinds / 2) + remnantPressure;
-  return Math.max(ADAPTIVE_BEAM_MIN, Math.min(ADAPTIVE_BEAM_MAX, dynamicWidth));
+  const dynamicWidth = BEAM_WIDTH + profile.beamWidthBias + Math.floor(activePartKinds / 2) + remnantPressure;
+  return Math.max(ADAPTIVE_BEAM_MIN, Math.min(ADAPTIVE_BEAM_MAX, Math.round(dynamicWidth)));
 }
 
 
@@ -620,7 +621,7 @@ function chooseNextTableByBeam(baseState, enabledCoils, dpCache, totalRequiredAr
   const beamWidth = computeAdaptiveBeamWidth(baseState.partsRemaining, baseState.remnantStrips);
   let frontier = [{ state: cloneSolverState(baseState), firstPattern: null, score: Infinity }];
 
-  for (let depth = 0; depth < BEAM_DEPTH; depth++) {
+  for (let depth = 0; depth < profile.beamDepth; depth++) {
     const expanded = [];
 
     frontier.forEach((node) => {
