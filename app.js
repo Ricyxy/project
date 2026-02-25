@@ -1,4 +1,4 @@
-﻿const coils = [
+const coils = [
   { width: 125, enabled: true },
   { width: 100, enabled: true },
   { width: 50, enabled: true },
@@ -1024,6 +1024,7 @@ function findUnplaceablePart(partsRemaining, enabledCoils) {
 }
 
 function solveCutPlan(partsInput, enabledCoils, originalPartsReference = null) {
+  const optimizationProfile = getOptimizationProfile(optimizationModeSelect?.value || 'balanced');
   const originalParts = originalPartsReference
     ? originalPartsReference.map((p) => ({ ...p }))
     : partsInput.map((p) => ({ ...p }));
@@ -1057,9 +1058,9 @@ function solveCutPlan(partsInput, enabledCoils, originalPartsReference = null) {
       enabledCoils,
       dpCache,
       totalRequiredAreaCm,
-      profile,
+      optimizationProfile,
       candidatesCache
-    ) || buildBestTable(solverState.partsRemaining, enabledCoils, dpCache, profile, candidatesCache);
+    ) || buildBestTable(solverState.partsRemaining, enabledCoils, dpCache, optimizationProfile, candidatesCache);
 
     if (!bestTable) {
       const bad = findUnplaceablePart(solverState.partsRemaining, enabledCoils);
@@ -1289,3 +1290,4 @@ document.addEventListener('DOMContentLoaded', () => {
 
   calcBtn.addEventListener('click', calculate);
 });
+
