@@ -19,6 +19,10 @@ const BEAM_WIDTH = 3;
 const ADAPTIVE_BEAM_MIN = 2;
 const ADAPTIVE_BEAM_MAX = 6;
 const POST_PASS_ROUNDS = 2;
+const MAX_COMPOSITE_SEGMENTS = 3;
+const MAX_COMPOSITE_WIDTH_TOLERANCE_CM = 3;
+const MAX_COMPOSITES_PER_GROUP = 20;
+const MAX_COMPOSITE_TABLE_LENGTH = 6;
 
 const DEFAULT_OPTIMIZATION_PROFILE = {
   tableCountPenalty: 0.055,
@@ -30,6 +34,8 @@ const DEFAULT_OPTIMIZATION_PROFILE = {
   stateRemainingWeight: 0.35,
   remnantPotentialWeight: 0.18,
   lowYieldPenaltyWeight: 0.12,
+  wideRemnantBonusWeight: 0.12,
+  compositeLengthPenaltyWeight: 0.1,
   beamDepth: 2,
   beamWidthBias: 0,
   maxCandidatesPerStep: 6
@@ -46,6 +52,8 @@ const OPTIMIZATION_PROFILES = {
     stateRemainingWeight: 0.42,
     remnantPotentialWeight: 0.24,
     lowYieldPenaltyWeight: 0.06,
+    wideRemnantBonusWeight: 0.05,
+    compositeLengthPenaltyWeight: 0.08,
     beamDepth: 3,
     beamWidthBias: 1,
     maxCandidatesPerStep: 8
@@ -60,6 +68,8 @@ const OPTIMIZATION_PROFILES = {
     stateRemainingWeight: 0.35,
     remnantPotentialWeight: 0.18,
     lowYieldPenaltyWeight: 0.12,
+    wideRemnantBonusWeight: 0.12,
+    compositeLengthPenaltyWeight: 0.1,
     beamDepth: 2,
     beamWidthBias: 0,
     maxCandidatesPerStep: 6
@@ -74,6 +84,8 @@ const OPTIMIZATION_PROFILES = {
     stateRemainingWeight: 0.25,
     remnantPotentialWeight: 0.1,
     lowYieldPenaltyWeight: 0.3,
+    wideRemnantBonusWeight: 0.20,
+    compositeLengthPenaltyWeight: 0.12,
     beamDepth: 2,
     beamWidthBias: -1,
     maxCandidatesPerStep: 5
@@ -188,6 +200,101 @@ function normalizePartOrientation(part) {
   };
 }
 
+function buildCompositeCandidates(partsRemaining, tableLength) {
+  if (tableLength > MAX_COMPOSITE_TABLE_LENGTH + EPS) return [];
+
+  const active = [];
+  for (let i = 0; i < partsRemaining.length; i++) {
+    const p = partsRemaining[i];
+    if (p.qty > 0 && p.length <= tableLength + EPS) {
+      active.push({ idx: i, width: p.width, length: p.length, qty: p.qty });
+    }
+  }
+  if (active.length < 2) return [];
+
+  const composites = [];
+
+  // Generate pairs
+  for (let i = 0; i < active.length; i++) {
+    for (let j = i; j < active.length; j++) {
+      const a = active[i];
+      const b = active[j];
+      if (Math.abs(a.width - b.width) > MAX_COMPOSITE_WIDTH_TOLERANCE_CM + EPS) continue;
+
+      // For same part (i === j), need qty >= 2
+      if (i === j && a.qty < 2) continue;
+
+      const totalLength = round3(a.length + b.length);
+      if (totalLength > tableLength + EPS) continue;
+
+      const stripWidth = Math.max(a.width, b.width);
+      const effectiveArea = (a.width * a.length) + (b.width * b.length);
+      const sideWasteArea = ((stripWidth - a.width) * a.length) + ((stripWidth - b.width) * b.length);
+
+      composites.push({
+        segments: [
+          { partIdx: a.idx, partLength: a.length, partWidth: a.width, count: 1 },
+          { partIdx: b.idx, partLength: b.length, partWidth: b.width, count: 1 }
+        ],
+        width: stripWidth,
+        totalLength,
+        effectiveArea,
+        sideWasteArea
+      });
+
+      if (composites.length >= MAX_COMPOSITES_PER_GROUP * 2) break;
+    }
+    if (composites.length >= MAX_COMPOSITES_PER_GROUP * 2) break;
+  }
+
+  // Generate triples by extending pairs
+  const pairsCount = composites.length;
+  for (let pi = 0; pi < pairsCount && composites.length < MAX_COMPOSITES_PER_GROUP * 3; pi++) {
+    const pair = composites[pi];
+    if (pair.segments.length !== 2) continue;
+
+    for (let k = 0; k < active.length; k++) {
+      const c = active[k];
+      if (Math.abs(pair.width - c.width) > MAX_COMPOSITE_WIDTH_TOLERANCE_CM + EPS &&
+          Math.abs(pair.segments[0].partWidth - c.width) > MAX_COMPOSITE_WIDTH_TOLERANCE_CM + EPS) continue;
+
+      // Check qty availability
+      const usedByPair = {};
+      pair.segments.forEach((seg) => {
+        usedByPair[seg.partIdx] = (usedByPair[seg.partIdx] || 0) + seg.count;
+      });
+      const alreadyUsed = usedByPair[c.idx] || 0;
+      if (alreadyUsed + 1 > c.qty) continue;
+
+      const totalLength = round3(pair.totalLength + c.length);
+      if (totalLength > tableLength + EPS) continue;
+
+      const stripWidth = Math.max(pair.width, c.width);
+      const effectiveArea = pair.effectiveArea + (c.width * c.length);
+      const sideWasteArea = pair.sideWasteArea +
+        ((stripWidth - c.width) * c.length) +
+        (stripWidth > pair.width ? (stripWidth - pair.width) * pair.totalLength : 0);
+
+      composites.push({
+        segments: [
+          ...pair.segments,
+          { partIdx: c.idx, partLength: c.length, partWidth: c.width, count: 1 }
+        ],
+        width: stripWidth,
+        totalLength,
+        effectiveArea,
+        sideWasteArea
+      });
+
+      if (composites.length >= MAX_COMPOSITES_PER_GROUP * 3) break;
+    }
+  }
+
+  // Sort by effective area descending and cap
+  composites.sort((a, b) => b.effectiveArea - a.effectiveArea);
+  return composites.slice(0, MAX_COMPOSITES_PER_GROUP);
+}
+
 function getPartsFromUI() {
   const rows = Array.from(document.querySelectorAll('.partRow'));
   if (rows.length === 0) {
@@ -236,6 +343,26 @@ function buildLengthCandidates(partsRemaining) {
     }
   });
 
+  // Add composite lengths (sums of 2-3 compatible-width parts)
+  for (let i = 0; i < active.length; i++) {
+    for (let j = i; j < active.length; j++) {
+      if (Math.abs(active[i].width - active[j].width) > MAX_COMPOSITE_WIDTH_TOLERANCE_CM + EPS) continue;
+      const len2 = round3(active[i].length + active[j].length);
+      if (len2 > EPS && len2 <= MAX_COMPOSITE_TABLE_LENGTH + EPS) {
+        set.add(len2.toFixed(3));
+      }
+      // Triples
+      for (let k = j; k < active.length; k++) {
+        if (Math.abs(active[i].width - active[k].width) > MAX_COMPOSITE_WIDTH_TOLERANCE_CM + EPS &&
+            Math.abs(active[j].width - active[k].width) > MAX_COMPOSITE_WIDTH_TOLERANCE_CM + EPS) continue;
+        const len3 = round3(len2 + active[k].length);
+        if (len3 > EPS && len3 <= MAX_COMPOSITE_TABLE_LENGTH + EPS) {
+          set.add(len3.toFixed(3));
+        }
+      }
+    }
+  }
+
   set.add(MAX_TABLE_LENGTH.toFixed(3));
 
   return Array.from(set)
@@ -248,7 +375,13 @@ function clonePattern(pattern) {
   if (!pattern) return null;
   return {
     ...pattern,
-    strips: pattern.strips.map((s) => ({ ...s }))
+    strips: pattern.strips.map((s) => {
+      const cloned = { ...s };
+      if (s.composite && s.segments) {
+        cloned.segments = s.segments.map((seg) => ({ ...seg }));
+      }
+      return cloned;
+    })
   };
 }
 
@@ -270,7 +403,13 @@ function computeRemainingAreaCm(partsRemaining) {
 function getRemainingAfterPattern(partsRemaining, pattern) {
   const remaining = partsRemaining.map((p) => ({ ...p }));
   pattern.strips.forEach((s) => {
-    remaining[s.partIndex].qty = Math.max(0, remaining[s.partIndex].qty - s.produced);
+    if (s.composite && s.segments) {
+      s.segments.forEach((seg) => {
+        remaining[seg.partIndex].qty = Math.max(0, remaining[seg.partIndex].qty - seg.count * s.strips);
+      });
+    } else {
+      remaining[s.partIndex].qty = Math.max(0, remaining[s.partIndex].qty - s.produced);
+    }
   });
   return remaining;
 }
@@ -279,6 +418,17 @@ function buildPatternRemnantRectangles(pattern) {
   const rectangles = [];
 
   pattern.strips.forEach((s) => {
+    if (s.composite && s.segments) {
+      // Composite strip: remnant is tableLength - totalLength per strip instance
+      for (let i = 0; i < s.strips; i++) {
+        const remLength = pattern.maxLength - s.totalLength;
+        if (remLength > EPS) {
+          rectangles.push({ width: s.width, length: remLength });
+        }
+      }
+      return;
+    }
+
     const fullStrips = Math.floor(s.produced / s.pps);
     let remainder = s.produced % s.pps;
 
@@ -385,6 +535,7 @@ function buildBestPatternForCoilAndLength(partsRemaining, coilWidth, tableLength
 
   const stripItems = [];
 
+  // Solo strip items (as before)
   for (let idx = 0; idx < partsRemaining.length; idx++) {
     const p = partsRemaining[idx];
     if (p.qty <= 0) continue;
@@ -411,10 +562,35 @@ function buildBestPatternForCoilAndLength(partsRemaining, coilWidth, tableLength
       stripItems.push({
         partIdx: idx,
         weight: widthUnits,
-        value: deltaPieces * p.width * p.length
+        value: deltaPieces * p.width * p.length,
+        composite: null
       });
     }
   }
+
+  // Composite strip items
+  const composites = buildCompositeCandidates(partsRemaining, tableLength);
+  composites.forEach((comp) => {
+    const widthUnits = toWidthUnits(comp.width);
+    if (widthUnits <= 0 || widthUnits > coilUnits) return;
+
+    const maxByDemand = Math.min(...comp.segments.map((seg) => {
+      const p = partsRemaining[seg.partIdx];
+      return Math.floor(p.qty / seg.count);
+    }));
+    const maxByWidth = Math.floor(coilUnits / widthUnits);
+    const maxStrips = Math.min(maxByDemand, maxByWidth);
+    if (maxStrips <= 0) return;
+
+    for (let s = 1; s <= maxStrips; s++) {
+      stripItems.push({
+        partIdx: -1,
+        weight: widthUnits,
+        value: comp.effectiveArea,
+        composite: comp
+      });
+    }
+  });
 
   if (stripItems.length === 0) {
     if (dpCache) dpCache.set(cacheKey, null);
@@ -457,19 +633,32 @@ function buildBestPatternForCoilAndLength(partsRemaining, coilWidth, tableLength
     return null;
   }
 
-  const stripCountByPart = new Map();
+  // Backtrack selected items
+  const selectedItems = [];
   let widthCursor = bestWidth;
   while (widthCursor > 0 && prevItem[widthCursor] !== -1) {
-    const itemIdx = prevItem[widthCursor];
-    const item = stripItems[itemIdx];
-    stripCountByPart.set(item.partIdx, (stripCountByPart.get(item.partIdx) || 0) + 1);
+    selectedItems.push(stripItems[prevItem[widthCursor]]);
     widthCursor = prevWidth[widthCursor];
   }
 
-  if (stripCountByPart.size === 0) {
+  if (selectedItems.length === 0) {
     if (dpCache) dpCache.set(cacheKey, null);
     return null;
   }
+
+  // Separate solo and composite items
+  const soloItems = selectedItems.filter((it) => !it.composite);
+  const compositeItems = selectedItems.filter((it) => it.composite);
+
+  // Build demand tracking for conflict resolution
+  const demandUsed = {};
+  partsRemaining.forEach((_, idx) => { demandUsed[idx] = 0; });
+
+  // Process solo strips
+  const stripCountByPart = new Map();
+  soloItems.forEach((item) => {
+    stripCountByPart.set(item.partIdx, (stripCountByPart.get(item.partIdx) || 0) + 1);
+  });
 
   const strips = [];
   let producedArea = 0;
@@ -479,11 +668,13 @@ function buildBestPatternForCoilAndLength(partsRemaining, coilWidth, tableLength
   stripCountByPart.forEach((stripCount, partIdx) => {
     const part = partsRemaining[partIdx];
     const pps = Math.floor((tableLength + EPS) / part.length);
-    const produced = Math.min(stripCount * pps, part.qty);
+    const available = part.qty - demandUsed[partIdx];
+    const produced = Math.min(stripCount * pps, available);
     if (produced <= 0) return;
 
     strips.push({
       partIndex: partIdx,
+      composite: false,
       width: part.width,
       partLength: part.length,
       strips: stripCount,
@@ -491,9 +682,50 @@ function buildBestPatternForCoilAndLength(partsRemaining, coilWidth, tableLength
       produced
     });
 
+    demandUsed[partIdx] += produced;
     usedWidthUnits += stripCount * toWidthUnits(part.width);
     producedArea += produced * part.width * part.length;
     producedPieces += produced;
+  });
+
+  // Process composite strips
+  compositeItems.forEach((item) => {
+    const comp = item.composite;
+    // Check demand availability for all segments
+    const canProduce = comp.segments.every((seg) => {
+      const available = partsRemaining[seg.partIdx].qty - demandUsed[seg.partIdx];
+      return available >= seg.count;
+    });
+    if (!canProduce) return;
+
+    const segments = comp.segments.map((seg) => ({
+      partIndex: seg.partIdx,
+      partLength: seg.partLength,
+      partWidth: seg.partWidth,
+      count: seg.count
+    }));
+
+    let compositeProduced = 0;
+    segments.forEach((seg) => {
+      demandUsed[seg.partIndex] += seg.count;
+      compositeProduced += seg.count;
+      producedArea += seg.partWidth * seg.partLength * seg.count;
+    });
+
+    strips.push({
+      partIndex: -1,
+      composite: true,
+      width: comp.width,
+      segments,
+      totalLength: comp.totalLength,
+      partLength: comp.totalLength,
+      strips: 1,
+      pps: 1,
+      produced: compositeProduced
+    });
+
+    usedWidthUnits += toWidthUnits(comp.width);
+    producedPieces += compositeProduced;
   });
 
   if (strips.length === 0) {
@@ -504,7 +736,16 @@ function buildBestPatternForCoilAndLength(partsRemaining, coilWidth, tableLength
   const remainingWidth = fromWidthUnits(Math.max(0, coilUnits - usedWidthUnits));
   const totalArea = coilWidth * tableLength;
   const wasteArea = totalArea - producedArea;
-  const producedByPart = new Map(strips.map((s) => [s.partIndex, s.produced]));
+  const producedByPart = new Map();
+  strips.forEach((s) => {
+    if (s.composite) {
+      s.segments.forEach((seg) => {
+        producedByPart.set(seg.partIndex, (producedByPart.get(seg.partIndex) || 0) + seg.count);
+      });
+    } else {
+      producedByPart.set(s.partIndex, (producedByPart.get(s.partIndex) || 0) + s.produced);
+    }
+  });
   const finishesAll = partsRemaining.every((p, idx) => {
     if (p.qty <= 0) return true;
     return (producedByPart.get(idx) || 0) >= p.qty;
@@ -588,11 +829,20 @@ function buildTableCandidates(partsRemaining, enabledCoils, dpCache, profile, li
       const usefulRemnantArea = estimateReusableAreaFromRectangles(remnantRects, remainingAfterPattern);
       const sideWasteArea = pattern.remainingWidth * pattern.maxLength;
       const shapeMetrics = computePatternShapeMetrics(pattern);
-      const lengthPenalty = profile.lengthPenaltyWeight * (pattern.maxLength / MAX_TABLE_LENGTH);
+      let lengthPenalty = profile.lengthPenaltyWeight * (pattern.maxLength / MAX_TABLE_LENGTH);
+      const compositeStripCount = pattern.strips.filter((s) => s.composite).length;
+      if (compositeStripCount > 0 && pattern.maxLength > MAX_TABLE_LENGTH * 0.75) {
+        lengthPenalty += profile.compositeLengthPenaltyWeight *
+          (pattern.maxLength / MAX_TABLE_LENGTH) *
+          (compositeStripCount / Math.max(pattern.strips.length, 1));
+      }
       const fragmentationPenalty = profile.remnantFragmentPenaltyWeight * shapeMetrics.normalizedFragmentation;
       const compactRemnantBonus = profile.compactRemnantBonusWeight * shapeMetrics.compactnessRatio;
       const producedShare = Math.min(1, pattern.producedArea / Math.max(remainingDemandAreaCm, EPS));
       const lowYieldPenalty = profile.lowYieldPenaltyWeight * Math.pow(Math.max(0, 1 - producedShare), 2);
+      const wideRemnantBonus = pattern.remainingWidth >= 10
+        ? profile.wideRemnantBonusWeight * (pattern.remainingWidth / coil.coilWidth)
+        : 0;
       const adjustedWastePerProduced =
         ((pattern.wasteArea +
         (profile.sideWastePenaltyWeight * sideWasteArea) -
@@ -601,7 +851,8 @@ function buildTableCandidates(partsRemaining, enabledCoils, dpCache, profile, li
         lengthPenalty +
         fragmentationPenalty -
         compactRemnantBonus +
-        lowYieldPenalty;
+        lowYieldPenalty -
+        wideRemnantBonus;
 
       candidateEntries.push({
         pattern,
@@ -629,7 +880,7 @@ function buildTableCandidates(partsRemaining, enabledCoils, dpCache, profile, li
     }
     if (Math.abs(pa.producedArea - pb.producedArea) > EPS) return pb.producedArea - pa.producedArea;
     if (Math.abs(pa.wasteArea - pb.wasteArea) > EPS) return pa.wasteArea - pb.wasteArea;
-    return pa.remainingWidth - pb.remainingWidth;
+    return pb.remainingWidth - pa.remainingWidth;
   });
 
   const trimmed = candidateEntries.slice(0, Math.max(candidateLimit, profile.maxCandidatesPerStep));
@@ -725,7 +976,13 @@ function chooseNextTableByBeam(baseState, enabledCoils, dpCache, totalRequiredAr
 
 function applyTable(partsRemaining, table) {
   table.strips.forEach((s) => {
-    partsRemaining[s.partIndex].qty -= s.produced;
+    if (s.composite && s.segments) {
+      s.segments.forEach((seg) => {
+        partsRemaining[seg.partIndex].qty -= seg.count * s.strips;
+      });
+    } else {
+      partsRemaining[s.partIndex].qty -= s.produced;
+    }
   });
 }
 
@@ -733,6 +990,28 @@ function materializeTableFromPattern(tablePattern) {
   const stripInstances = [];
 
   tablePattern.strips.forEach((s) => {
+    if (s.composite && s.segments) {
+      // Composite strip: each strip instance has cuts from all segments
+      for (let i = 0; i < s.strips; i++) {
+        const cuts = [];
+        s.segments.forEach((seg) => {
+          for (let c = 0; c < seg.count; c++) {
+            cuts.push({
+              partIndex: seg.partIndex,
+              width: seg.partWidth,
+              length: seg.partLength
+            });
+          }
+        });
+        stripInstances.push({
+          width: s.width,
+          cuts,
+          remainingLength: Math.max(0, tablePattern.maxLength - s.totalLength)
+        });
+      }
+      return;
+    }
+
     const fullStrips = Math.floor(s.produced / s.pps);
     let remainder = s.produced % s.pps;
 
@@ -1077,8 +1356,8 @@ function findUnplaceablePart(partsRemaining, enabledCoils) {
   return partsRemaining.find((p) => p.qty > 0 && (p.width > maxCoilWidth + EPS || p.length > MAX_TABLE_LENGTH + EPS));
 }
 
-function solveCutPlan(partsInput, enabledCoils, originalPartsReference = null) {
-  const optimizationProfile = getOptimizationProfile(optimizationModeSelect?.value || 'balanced');
+function solveCutPlan(partsInput, enabledCoils, mode = 'balanced', originalPartsReference = null) {
+  const optimizationProfile = getOptimizationProfile(mode);
   const originalParts = originalPartsReference
     ? originalPartsReference.map((p) => ({ ...p }))
     : partsInput.map((p) => ({ ...p }));
@@ -1150,22 +1429,27 @@ function solveCutPlan(partsInput, enabledCoils, originalPartsReference = null) {
 }
 
 function isScrapCandidatePart(part) {
-  return part.qty > 0 && part.length <= MAX_SCRAP_LENGTH_M + EPS;
+  return part.qty > 0;
 }
 
 function getScrapAvailabilityScore(part) {
   if (part.length <= COMMON_SCRAP_MAX_LENGTH_M + EPS && part.width <= COMMON_SCRAP_MAX_WIDTH_CM + EPS) {
-    return 2;
+    return 3;
   }
   if (part.length <= MAX_SCRAP_LENGTH_M + EPS) {
+    return 2;
+  }
+  if (part.length <= 2.0 + EPS) {
     return 1;
   }
   return 0;
 }
 
-function findScrapSuggestions(originalParts, enabledCoils, baseWasteM2) {
+function findScrapSuggestions(originalParts, enabledCoils, baseWasteM2, mode = 'balanced') {
   const suggestions = [];
 
+  // Phase 1: Single-part removal
+  const singlePartIndices = [];
   originalParts.forEach((part, idx) => {
     if (!isScrapCandidatePart(part)) return;
 
@@ -1176,21 +1460,69 @@ function findScrapSuggestions(originalParts, enabledCoils, baseWasteM2) {
 
     if (reducedParts[idx].qty === part.qty) return;
 
-    const variantResult = solveCutPlan(reducedParts, enabledCoils, originalParts);
+    const variantResult = solveCutPlan(reducedParts, enabledCoils, mode, originalParts);
     if (variantResult.error) return;
 
     const savedWaste = baseWasteM2 - variantResult.totalWasteM2;
     if (savedWaste <= EPS) return;
 
+    singlePartIndices.push(idx);
     suggestions.push({
       part,
       partIndex: idx,
+      multiPart: false,
       reducedParts,
       savedWasteM2: savedWaste,
       availabilityScore: getScrapAvailabilityScore(part),
       plan: variantResult
     });
   });
+
+  // Phase 2: Two-part removal (pairs of promising single parts)
+  const promisingIndices = singlePartIndices.filter((idx) =>
+    suggestions.some((s) => s.partIndex === idx && s.savedWasteM2 > 0.001)
+  );
+
+  for (let i = 0; i < promisingIndices.length; i++) {
+    const idx1 = promisingIndices[i];
+    for (let idx2 = 0; idx2 < originalParts.length; idx2++) {
+      if (idx2 === idx1 || originalParts[idx2].qty <= 0) continue;
+
+      const reducedParts = originalParts.map((p, pIdx) => ({
+        ...p,
+        qty: (pIdx === idx1 || pIdx === idx2) ? Math.max(0, p.qty - 1) : p.qty
+      }));
+
+      if (reducedParts[idx1].qty === originalParts[idx1].qty &&
+          reducedParts[idx2].qty === originalParts[idx2].qty) continue;
+
+      const variantResult = solveCutPlan(reducedParts, enabledCoils, mode, originalParts);
+      if (variantResult.error) continue;
+
+      const savedWaste = baseWasteM2 - variantResult.totalWasteM2;
+      if (savedWaste <= EPS) continue;
+
+      // Only keep if better than best single-part suggestion
+      const bestSingleSave = Math.max(
+        ...suggestions.filter((s) => !s.multiPart).map((s) => s.savedWasteM2),
+        0
+      );
+      if (savedWaste <= bestSingleSave + EPS) continue;
+
+      suggestions.push({
+        parts: [originalParts[idx1], originalParts[idx2]],
+        partIndices: [idx1, idx2],
+        multiPart: true,
+        reducedParts,
+        savedWasteM2: savedWaste,
+        availabilityScore: Math.min(
+          getScrapAvailabilityScore(originalParts[idx1]),
+          getScrapAvailabilityScore(originalParts[idx2])
+        ),
+        plan: variantResult
+      });
+    }
+  }
 
   suggestions.sort((a, b) => {
     if (a.availabilityScore !== b.availabilityScore) {
@@ -1199,7 +1531,9 @@ function findScrapSuggestions(originalParts, enabledCoils, baseWasteM2) {
     if (Math.abs(a.savedWasteM2 - b.savedWasteM2) > EPS) {
       return b.savedWasteM2 - a.savedWasteM2;
     }
-    return a.part.width - b.part.width;
+    const aWidth = a.multiPart ? Math.min(...a.parts.map((p) => p.width)) : a.part.width;
+    const bWidth = b.multiPart ? Math.min(...b.parts.map((p) => p.width)) : b.part.width;
+    return aWidth - bWidth;
   });
 
   return suggestions.slice(0, MAX_SCRAP_SUGGESTIONS);
@@ -1209,14 +1543,18 @@ function renderScrapSuggestionsSummary(suggestions) {
   if (!suggestions.length) return '';
 
   const labelByScore = {
-    2: 'vrlo cest otpad (do 40cm i do 0.4m)',
-    1: 'moguc otpad (do 1m)',
+    3: 'vrlo cest otpad (do 40cm i do 0.4m)',
+    2: 'cest otpad (do 1m)',
+    1: 'moguc otpad (do 2m)',
     0: 'rijedji otpad'
   };
 
-  const itemsHtml = suggestions.map((s, idx) => (
-    `<li>#${idx + 1} ${s.part.width}cm x ${s.part.length}m, usteda otpada ~${s.savedWasteM2.toFixed(3)} m2 (${labelByScore[s.availabilityScore]})</li>`
-  )).join('');
+  const itemsHtml = suggestions.map((s, idx) => {
+    const partsLabel = s.multiPart
+      ? s.parts.map((p) => `${p.width}cm x ${p.length}m`).join(' + ')
+      : `${s.part.width}cm x ${s.part.length}m`;
+    return `<li>#${idx + 1} ${partsLabel}, usteda otpada ~${s.savedWasteM2.toFixed(3)} m2 (${labelByScore[s.availabilityScore]})</li>`;
+  }).join('');
 
   return `<br><b>Predlozeni komadi sa otpada:</b><ul>${itemsHtml}</ul>`;
 }
@@ -1240,14 +1578,21 @@ function setScrapDecisionPreference(value) {
   }
 }
 
-function renderScrapDecisionPanel(suggestion) {
+function renderScrapDecisionPanel(suggestion, currentIndex, totalCount) {
+  const partsLabel = suggestion.multiPart
+    ? suggestion.parts.map((p) => `${p.width}cm x ${p.length}m`).join(' + ')
+    : `${suggestion.part.width} cm x ${suggestion.part.length} m`;
+  const countLabel = totalCount > 1 ? ` (prijedlog ${currentIndex + 1} od ${totalCount})` : '';
+  const declineLabel = currentIndex + 1 < totalCount
+    ? 'Nemam, pokazi sljedeci prijedlog'
+    : 'Nemam, ostavi osnovni plan';
   return `
     <div class="scrap-panel">
-      <b>Prijedlog otpada:</b> Mozete li pronaci 1 komad ${suggestion.part.width} cm x ${suggestion.part.length} m?<br>
+      <b>Prijedlog otpada${countLabel}:</b> Mozete li pronaci ${suggestion.multiPart ? 'komade' : '1 komad'} ${partsLabel}?<br>
       Procijenjeno smanjenje otpada: <b>${suggestion.savedWasteM2.toFixed(3)} m2</b>.
       <div class="scrap-panel-actions">
-        <button type="button" id="acceptScrapBtn" class="scrap-accept">Imam taj komad</button>
-        <button type="button" id="declineScrapBtn" class="scrap-decline">Nemam, ostavi osnovni plan</button>
+        <button type="button" id="acceptScrapBtn" class="scrap-accept">Imam ${suggestion.multiPart ? 'te komade' : 'taj komad'}</button>
+        <button type="button" id="declineScrapBtn" class="scrap-decline">${declineLabel}</button>
       </div>
       <label class="scrap-remember">
         <input type="checkbox" id="rememberScrapDecision"> Zapamti izbor za sljedece proracune
@@ -1257,35 +1602,43 @@ function renderScrapDecisionPanel(suggestion) {
   `;
 }
 
-function renderPlanOutput(plan, suggestions, extraNote = '', includeDecisionPanel = false) {
+function renderPlanOutput(plan, suggestions, extraNote = '', includeDecisionPanel = false, suggestionIndex = 0) {
   const noteHtml = extraNote ? `<b>Napomena:</b> ${extraNote}<br><br>` : '';
-  const panelHtml = includeDecisionPanel && suggestions[0] ? renderScrapDecisionPanel(suggestions[0]) : '';
+  const panelHtml = includeDecisionPanel && suggestions[suggestionIndex]
+    ? renderScrapDecisionPanel(suggestions[suggestionIndex], suggestionIndex, suggestions.length)
+    : '';
   resultDiv.innerHTML = noteHtml + renderResult(plan.coilsResult, plan.originalParts) + panelHtml + renderScrapSuggestionsSummary(suggestions);
 }
 
-function bindScrapDecisionHandlers(basePlan, selectedSuggestion, allSuggestions) {
+function bindScrapDecisionHandlers(basePlan, allSuggestions, currentIndex = 0) {
   const acceptBtn = document.getElementById('acceptScrapBtn');
   const declineBtn = document.getElementById('declineScrapBtn');
   const rememberCheckbox = document.getElementById('rememberScrapDecision');
   if (!acceptBtn || !declineBtn) return;
 
+  const selectedSuggestion = allSuggestions[currentIndex];
+
   acceptBtn.addEventListener('click', () => {
     if (rememberCheckbox?.checked) {
       setScrapDecisionPreference('use');
     }
-    renderPlanOutput(
-      selectedSuggestion.plan,
-      allSuggestions,
-      'Koristen je scenarij sa 1 komadom preuzetim sa otpada.',
-      false
-    );
+    const noteLabel = selectedSuggestion.multiPart
+      ? 'Koristen je scenarij sa komadima preuzetim sa otpada.'
+      : 'Koristen je scenarij sa 1 komadom preuzetim sa otpada.';
+    renderPlanOutput(selectedSuggestion.plan, allSuggestions, noteLabel, false);
   });
 
   declineBtn.addEventListener('click', () => {
     if (rememberCheckbox?.checked) {
       setScrapDecisionPreference('skip');
     }
-    renderPlanOutput(basePlan, allSuggestions, 'Ostao je osnovni proracun bez komada sa otpada.', false);
+    const nextIndex = currentIndex + 1;
+    if (nextIndex < allSuggestions.length) {
+      renderPlanOutput(basePlan, allSuggestions, '', true, nextIndex);
+      bindScrapDecisionHandlers(basePlan, allSuggestions, nextIndex);
+    } else {
+      renderPlanOutput(basePlan, allSuggestions, 'Ostao je osnovni proracun bez komada sa otpada.', false);
+    }
   });
 }
 
@@ -1302,13 +1655,14 @@ function calculate() {
     return;
   }
 
-  const basePlan = solveCutPlan(partsData.parts, enabledCoils);
+  const mode = optimizationModeSelect?.value || 'balanced';
+  const basePlan = solveCutPlan(partsData.parts, enabledCoils, mode);
   if (basePlan.error) {
     resultDiv.innerHTML = basePlan.error;
     return;
   }
 
-  const scrapSuggestions = findScrapSuggestions(basePlan.originalParts, enabledCoils, basePlan.totalWasteM2);
+  const scrapSuggestions = findScrapSuggestions(basePlan.originalParts, enabledCoils, basePlan.totalWasteM2, mode);
   const scrapSuggestion = scrapSuggestions[0] || null;
   const pref = getScrapDecisionPreference();
 
@@ -1323,8 +1677,8 @@ function calculate() {
   }
 
   if (scrapSuggestion && pref !== 'skip') {
-    renderPlanOutput(basePlan, scrapSuggestions, '', true);
-    bindScrapDecisionHandlers(basePlan, scrapSuggestion, scrapSuggestions);
+    renderPlanOutput(basePlan, scrapSuggestions, '', true, 0);
+    bindScrapDecisionHandlers(basePlan, scrapSuggestions, 0);
     return;
   }
 
